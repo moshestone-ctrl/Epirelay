@@ -149,7 +149,7 @@ These were deliberate; change them only after thinking them through.
 - **Stack:** Expo SDK 58 (React Native 0.88, Expo Router, React Compiler), TypeScript, Supabase (Postgres + RLS +
   Realtime + pg_net), `react-native-maps`.
 - **Builds:** `.github/workflows/android.yml` runs type-check, lint and backend tests, then `expo prebuild` +
-  `gradlew assembleRelease` (arm64-v8a, armeabi-v7a) and publishes the APK as a GitHub Release. Config is in
+  `gradlew assembleRelease` (arm64-v8a, armeabi-v7a, x86_64 — the last so the emulator launch check can run it) and publishes the APK as a GitHub Release. Config is in
   `app.config.js` (Maps key and version code come from the build environment). The `android/` folder is generated
   and not committed. For store releases, switch to EAS Build or add a real upload keystore.
 - **Backend:** everything is in `supabase/schema.sql` — tables, row-level-security policies, and `security definer`
