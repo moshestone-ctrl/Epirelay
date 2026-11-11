@@ -1,0 +1,45 @@
+# Opens a published build on an Android emulator and records whether it starts, plus any crash logs.
+# Run it: Actions → "Diagnose app launch" → Run workflow.
+name: Diagnose app launch
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to test (empty = latest)
+        required: false
+        default: ''
+      api_level:
+        description: Android API level of the emulator
+        required: false
+        default: '34'
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download ${{ inputs.tag }} --repo "${{ github.repository }}" --pattern '*.apk' --dir apk
+          ls -la apk
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Launch on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ inputs.api_level }}
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash .github/scripts/launch-test.sh
