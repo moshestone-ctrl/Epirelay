@@ -1,11 +1,12 @@
 import { Link, router, useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { Alert, Pressable, View } from 'react-native';
+import { Alert, Linking, Pressable, View } from 'react-native';
 
 import { HoldToSos } from '@/components/HoldToSos';
 import { Badge, Button, Card, Screen, T, ToggleRow } from '@/components/ui';
 import { api, errorMessage } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { isBackgroundLocationRunning, startBackgroundLocation } from '@/lib/backgroundLocation';
 import { EMERGENCY_NUMBER } from '@/lib/config';
 import { useInterval, useRealtime } from '@/lib/hooks';
 import { callEmergency, ensureLocationPermission, formatDistance, getCurrentCoords, timeAgo } from '@/lib/location';
@@ -19,9 +20,11 @@ export default function Home() {
   const [practice, setPractice] = useState(false);
   const [mine, setMine] = useState<MyAlerts | null>(null);
   const [nearby, setNearby] = useState<number | null>(null);
+  const [bgOn, setBgOn] = useState<boolean | null>(null);
 
   const refresh = useCallback(async () => {
     api.myAlerts().then(setMine).catch(() => {});
+    isBackgroundLocationRunning().then(setBgOn);
     try {
       if (await ensureLocationPermission()) {
         const c = await getCurrentCoords();
@@ -66,6 +69,45 @@ export default function Home() {
       ]);
     } finally {
       setSending(false);
+    }
+  };
+
+  // Google Play requires this explanation before asking for location "all the time".
+  const askBackground = () =>
+    Alert.alert(
+      'Get alerts in the background',
+      'While you’re marked Available, EpiRelay uses your location in the background — even when the app is ' +
+        'closed or not in use — so you can be matched with someone nearby who needs epinephrine.\n\n' +
+        'Your location is never shown to other people, and this stops when you turn off Available.\n\n' +
+        'On the next screen, choose “Allow all the time”.',
+      [
+        { text: 'Not now', style: 'cancel' },
+        {
+          text: 'Continue',
+          onPress: async () => {
+            const r = await startBackgroundLocation(true);
+            setBgOn(r === 'on');
+            if (r === 'needs_always' || r === 'denied') {
+              Alert.alert(
+                'Location “All the time” is needed',
+                'Open Settings → Permissions → Location and choose “Allow all the time”. Until then, alerts only reach you while EpiRelay is open.',
+                [{ text: 'Later', style: 'cancel' }, { text: 'Open Settings', onPress: () => Linking.openSettings() }],
+              );
+            } else if (r === 'error') {
+              Alert.alert('Couldn’t start background alerts', 'Please try again in a moment.');
+            }
+          },
+        },
+      ],
+    );
+
+  const setAvailable = async (v: boolean) => {
+    try {
+      await updateProfile({ available_to_respond: v });
+      if (v && !(await isBackgroundLocationRunning())) askBackground();
+      if (!v) setBgOn(false);
+    } catch (e) {
+      Alert.alert('Could not update', errorMessage(e));
     }
   };
 
@@ -129,11 +171,18 @@ export default function Home() {
                 : 'You’ll get an alert when someone nearby needs epinephrine.'
             }
             value={profile.available_to_respond}
-            onValueChange={(v) =>
-              updateProfile({ available_to_respond: v }).catch((e) => Alert.alert('Could not update', errorMessage(e)))
-            }
+            onValueChange={setAvailable}
           />
           {expiry.text ? <Badge text={expiry.text} tone={expiry.tone} /> : null}
+          {profile.available_to_respond && expiry.tone !== 'danger' && bgOn === false && (
+            <View style={{ gap: space.sm, marginTop: space.xs }}>
+              <T kind="small">Right now alerts only reach you while EpiRelay is open.</T>
+              <Button kind="secondary" title="Get alerts in the background" onPress={askBackground} />
+            </View>
+          )}
+          {profile.available_to_respond && bgOn === true && (
+            <Badge text="BACKGROUND ALERTS ON" tone="ok" />
+          )}
         </Card>
       ) : (
         <Card>

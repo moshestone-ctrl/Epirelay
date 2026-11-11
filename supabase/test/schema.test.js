@@ -156,8 +156,52 @@ const north = (m) => ({ lat: base.lat + m / 111320, lng: base.lng });
   const aHome = (await rpc('A', 'select public.my_alerts() r')).r;
   ok(aHome.my_active_alert_id === null, 'alerts older than 2 h auto-close');
 
+  console.log('\nSafety tools');
+  // C was alerted for a2, so C may report it; D (never alerted for a2) may not.
+  ok((await rpc('C', `select public.report_alert($1, 'fake', 'nobody answered') r`, [a2.alert_id])).r.ok, 'alerted responder can report an SOS as fake');
+  ok((await rpc('C', `select public.report_alert($1, 'no_one_there') r`, [a2.alert_id])).r.ok, 'reporting again updates the report');
+  ok((await db.query('select count(*)::int c from public.alert_reports')).rows[0].c === 1, 'one report stored per responder per alert');
+  ok((await rpc('D', `select public.report_alert($1, 'fake') r`, [a2.alert_id])).r.reason === 'not_invited', 'people who were not alerted cannot report');
+  ok(!!(await fails('C', 'select * from public.alert_reports')), 'reports are not readable from the app');
+  ok(!!(await fails('A', 'select * from public.suspended_users')), 'suspension list is not readable from the app');
+  ok(!!(await fails('A', `insert into public.suspended_users (user_id) values ('${U.A}')`)), 'app cannot write the suspension list');
+
+  // Rate limit: a2 was back-dated 3 h above, so A has 0 practice alerts this hour. 10 allowed, 11th refused.
+  for (let i = 0; i < 10; i++) {
+    const r = (await rpc('A', 'select public.create_alert($1,$2,null,true) r', [base.lat, base.lng])).r;
+    await as('A', `select public.close_alert($1, 'cancelled')`, [r.alert_id]);
+  }
+  const tooMany = await fails('A', 'select public.create_alert($1,$2,null,true)', [base.lat, base.lng]);
+  ok(tooMany && tooMany.includes('Too many alerts'), 'practice alerts are rate-limited (10 per hour)');
+  const realStillOk = (await rpc('A', 'select public.create_alert($1,$2) r', [base.lat, base.lng])).r;
+  ok(!realStillOk.existing && realStillOk.alert_id, 'a real SOS still goes through when practice alerts hit the limit');
+  await as('A', `select public.close_alert($1, 'cancelled')`, [realStillOk.alert_id]);
+
+  // Suspension: suspended carrier is not matched and cannot respond; suspended requester cannot send SOS.
+  await db.query('insert into public.suspended_users (user_id, reason) values ($1, $2)', [U.C, 'test']);
+  const g = (await rpc('G', 'select public.nearby_responder_count($1,$2) n', [base.lat, base.lng])).n;
+  ok(g === 2, `suspended carrier is no longer matched (count ${g}: B and I)`);
+  await db.query('insert into public.suspended_users (user_id, reason) values ($1, $2)', [U.G, 'test']);
+  const sus = await fails('G', 'select public.create_alert($1,$2)', [base.lat, base.lng]);
+  ok(sus && sus.includes('suspended'), 'suspended user cannot send an SOS');
+  // A suspended responder who was already alerted cannot accept.
+  const a3 = (await rpc('E', 'select public.create_alert($1,$2,null,true) r', [base.lat, base.lng])).r;
+  await db.query(`insert into public.alert_recipients (alert_id, user_id, distance_m) values ($1, $2, 100)`, [a3.alert_id, U.C]);
+  ok((await rpc('C', 'select public.respond_to_alert($1, true) r', [a3.alert_id])).r.reason === 'suspended', 'suspended responder cannot accept an SOS');
+  await as('E', `select public.close_alert($1, 'cancelled')`, [a3.alert_id]);
+
+  // Error reports
+  ok(!(await fails('A', `insert into public.app_errors (message, context) values ('boom', 'test')`)), 'signed-in user can send an error report');
+  ok(!!(await fails('A', `insert into public.app_errors (user_id, message) values ('${U.B}', 'spoof')`)), 'cannot send an error report as someone else');
+  ok(!!(await fails('A', 'select * from public.app_errors')), 'error reports are not readable from the app');
+  ok(!!(await fails(null, `insert into public.app_errors (message) values ('x')`)), 'logged-out callers cannot send error reports');
+
+  // Keep-awake health check
+  ok((await as(null, 'select public.ping() t')).rows.length === 1, 'logged-out health check (ping) works');
+
   console.log('\nPermissions');
   ok(!!(await fails(null, 'select public.create_alert(1,1)')), 'logged-out callers cannot create alerts');
+  ok(!!(await fails(null, 'select public.report_alert(gen_random_uuid(), \'fake\')')), 'logged-out callers cannot report alerts');
   ok(!!(await fails(null, 'select * from public.profiles')), 'logged-out callers cannot read profiles');
   ok(!!(await fails('A', `select public._notify_responders('${alertId}')`)), 'internal functions are not callable from the app');
   ok(!!(await fails('A', `select public._send_push('[]')`)), 'app cannot send arbitrary pushes');

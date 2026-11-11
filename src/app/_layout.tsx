@@ -1,13 +1,38 @@
-import { Stack } from 'expo-router';
+import '@/lib/backgroundLocation'; // defines the background location task at startup
+
+import { Stack, type ErrorBoundaryProps } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect } from 'react';
 import { View } from 'react-native';
 
 import { BackgroundServices } from '@/components/BackgroundServices';
-import { Card, Loading, Screen, T } from '@/components/ui';
+import { Button, Card, Loading, Screen, T } from '@/components/ui';
 import { AuthProvider, useAuth } from '@/lib/auth';
-import { APP_NAME, TERMS_VERSION } from '@/lib/config';
+import { APP_NAME, EMERGENCY_NUMBER, TERMS_VERSION } from '@/lib/config';
+import { installGlobalErrorReporting, reportError } from '@/lib/errors';
+import { callEmergency } from '@/lib/location';
 import { isConfigured } from '@/lib/supabase';
 import { useTheme } from '@/lib/theme';
+
+installGlobalErrorReporting();
+
+/** Shown instead of a crash if any screen fails. Keeps the 911 button one tap away. */
+export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
+  useEffect(() => {
+    reportError(error, 'screen');
+  }, [error]);
+  return (
+    <Screen edges={['top', 'bottom']}>
+      <T kind="title">Something went wrong</T>
+      <Card tone="danger">
+        <T kind="heading">If this is an emergency, call {EMERGENCY_NUMBER} now.</T>
+        <Button kind="danger" title={`Call ${EMERGENCY_NUMBER}`} onPress={callEmergency} />
+      </Card>
+      <T kind="muted">The problem has been reported to the EpiRelay team.</T>
+      <Button title="Try again" onPress={retry} />
+    </Screen>
+  );
+}
 
 export default function RootLayout() {
   return (
@@ -52,6 +77,7 @@ function RootStack() {
           <Stack.Screen name="feedback/[id]" options={{ title: 'How did it go?' }} />
         </Stack.Protected>
         <Stack.Screen name="safety" options={{ title: 'Safety & legal' }} />
+        <Stack.Screen name="reset-password" options={{ title: 'Set a new password' }} />
       </Stack>
       {onboarded && <BackgroundServices />}
     </View>

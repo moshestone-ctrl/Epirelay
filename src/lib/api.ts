@@ -7,7 +7,7 @@ async function rpc<T>(fn: string, args?: Record<string, unknown>): Promise<T> {
   return data as T;
 }
 
-type Result = { ok: boolean; reason?: 'closed' | 'not_invited' | 'enough_help' | 'not_responding' };
+type Result = { ok: boolean; reason?: 'closed' | 'not_invited' | 'enough_help' | 'not_responding' | 'suspended' };
 
 /** Thin wrappers around the database functions in supabase/schema.sql. */
 export const api = {
@@ -40,6 +40,9 @@ export const api = {
     rpc<Result>('close_alert', { p_alert_id: alertId, p_outcome: outcome }),
 
   getAlert: (alertId: string) => rpc<AlertView | null>('get_alert', { p_alert_id: alertId }),
+
+  reportAlert: (alertId: string, reason: 'fake' | 'no_one_there' | 'abusive' | 'other', note?: string) =>
+    rpc<Result>('report_alert', { p_alert_id: alertId, p_reason: reason, p_note: note ?? null }),
 
   myAlerts: () => rpc<MyAlerts>('my_alerts'),
 

@@ -5,6 +5,7 @@ import { Alert, View } from 'react-native';
 import { Button, Card, Field, Screen, Segmented, T, ToggleRow } from '@/components/ui';
 import { api, errorMessage } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { stopBackgroundLocation } from '@/lib/backgroundLocation';
 import { scheduleExpiryReminders } from '@/lib/notifications';
 import { supabase } from '@/lib/supabase';
 import { space, useTheme } from '@/lib/theme';
@@ -66,7 +67,10 @@ export default function ProfileScreen() {
     }
   };
 
-  const signOut = () => supabase.auth.signOut();
+  const signOut = async () => {
+    await stopBackgroundLocation();
+    await supabase.auth.signOut();
+  };
 
   const deleteAccount = () =>
     Alert.alert('Delete your account?', 'This permanently removes your profile, alerts and messages. It can’t be undone.', [
@@ -77,6 +81,7 @@ export default function ProfileScreen() {
         onPress: async () => {
           try {
             await api.deleteMyAccount();
+            await stopBackgroundLocation();
             await supabase.auth.signOut({ scope: 'local' });
           } catch (e) {
             Alert.alert('Could not delete', errorMessage(e));
@@ -164,6 +169,7 @@ export default function ProfileScreen() {
       <Button title="Save" onPress={save} loading={busy} />
 
       <View style={{ gap: space.sm, marginTop: space.lg }}>
+        <Button kind="secondary" title="Change password" onPress={() => router.push('/reset-password')} />
         <Button kind="secondary" title="Sign out" onPress={signOut} />
         <Button kind="ghost" title="Delete my account" onPress={deleteAccount} style={{ opacity: 0.9 }} />
         <T kind="small" style={{ textAlign: 'center', color: t.muted }}>

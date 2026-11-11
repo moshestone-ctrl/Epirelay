@@ -5,7 +5,7 @@ Someone having a severe allergic reaction holds the SOS button; nearby people wh
 alert, tap **I'm on my way**, navigate there, and hand it over.
 
 > **"EpiRelay" is a placeholder name.** "EpiPen" is a registered trademark of another company, so it can't be
-> in your app's name. Pick a final name, run a trademark search, then change it in `src/lib/config.ts` and `app.json`.
+> in your app's name. Pick a final name, run a trademark search, then change it in `src/lib/config.ts` and `app.config.js`.
 
 ---
 
@@ -20,17 +20,22 @@ alert, tap **I'm on my way**, navigate there, and hand it over.
 | **Live tracking** | The person in need sees who's coming and how far away, on a map, updating every ~10 s. Responders get one-tap directions in Apple/Google Maps. |
 | **Chat** | Two-way messages between the person and responders ("Apt 4B, door open"). |
 | **Privacy** | Nobody can see where carriers are — the app only shows a count nearby. Responders see only the *distance* until they commit to coming. Allergy info is shared only with committed responders, and only if the user allows it. Old precise locations are automatically coarsened. |
-| **After** | Star rating + comment. In-app account deletion (Apple requires it). |
+| **Background alerts** | Responders who allow location "All the time" stay matchable and get alerted while EpiRelay is in the background (Android shows a "Ready to respond" notification while they're Available). |
+| **Accounts** | Email + password, "Forgot password?" reset by email, change password, in-app account deletion. |
+| **Safety tools** | Responders can report a fake or abusive SOS. The team can suspend someone (no SOS, no responding, no messages). SOS spam is rate-limited (6 real / 10 practice alerts per hour). If any screen fails, the app shows a "Call 911" screen and reports the error. |
+| **Admin view** | A notebook in the Supabase dashboard ("EpiRelay admin") shows users, active alerts, response times, reports, suspensions, feedback and app errors. |
+| **After** | Star rating + comment. |
 
 ---
 
 ## Install it as a real Android app (no computer needed)
 
-Every time code is pushed to the `main` branch, GitHub builds the Android app on its own servers (about
-15–25 minutes) and publishes it under **Releases** in your repository.
+Every time code is pushed to the `main` branch, GitHub builds the Android app on its own servers, installs and
+opens it on an Android emulator to check it starts, and only then publishes it under **Releases** in your
+repository (about 30 minutes in total).
 
 1. On your Android phone, open your repository on github.com → **Releases** (or go straight to
-   `github.com/<your-username>/epirelay/releases/latest`). Sign in if asked — the repository is private.
+   `github.com/moshestone-ctrl/Epirelay/releases/latest`). Sign in if asked (only if the repository is private).
 2. Under **Assets**, tap **EpiRelay-build-N.apk** to download it.
 3. Open the download. Android will ask to allow installing apps from your browser — allow it, then tap **Install**.
    Google Play Protect may warn that the app is from an unknown developer; tap **More details → Install anyway**.
@@ -44,11 +49,40 @@ collaborators on the repository (Settings → Collaborators) so they can open th
   "Open in Google Maps" button instead. To turn the map on: create an Android Maps SDK key in Google Cloud
   Console, add it as a repository secret named `GOOGLE_MAPS_ANDROID_API_KEY` (Settings → Secrets and variables →
   Actions), then re-run the build (Actions → Build Android app → Run workflow).
-- Alerts reach a responder while EpiRelay is open on their screen. Alerts when the app is closed need a Firebase
-  project and an Expo account connected to the build — see "What still needs a developer" below.
+- Alerts reach a responder while EpiRelay is open, or running in the background after they allowed location
+  "All the time". Alerts after the app has been fully closed need push notifications — see the next section.
 - It's signed with a test key, which is fine for installing directly but not for the Play Store. Google plans to
   require verified developers for all Android apps, including directly installed ones, in 2027 — before then,
   move testing to a Play Console internal test track.
+
+---
+
+## One-time settings for you (Supabase dashboard)
+
+- **Password reset links:** Authentication → URL Configuration → **Redirect URLs** → add `epirelay://**` → Save.
+  Without this, the reset email's link opens a broken web page instead of the app.
+- **Delete my account:** SQL Editor → New query → paste `supabase/add-account-deletion.sql` → Run.
+- **Email confirmation:** off for testing (Authentication → Sign In / Providers → Email). Before launch, turn it
+  back on and connect your own email sender (Authentication → Emails → SMTP), since the built-in one only sends a
+  few emails per hour.
+- **Admin view:** SQL Editor → Notebooks (or the "EpiRelay admin" link Claude gave you) → Run all.
+- **Server sleeping:** free Supabase projects pause after a quiet week. The "Keep server awake" GitHub job pings it
+  twice a day; upgrading the project to the Pro plan removes the risk entirely and is recommended before a pilot.
+
+## Turning on alerts when the app is closed (push notifications)
+
+The code is ready; it needs two free accounts:
+
+1. **Expo** — sign up at expo.dev → **Create project** named `epi-relay` → copy its **Project ID**. In GitHub:
+   repository **Settings → Secrets and variables → Actions → Variables → New variable** named `EAS_PROJECT_ID`
+   with that ID.
+2. **Firebase** — at console.firebase.google.com create a project → **Add app → Android** with package name
+   `com.epirelay.app` → download **google-services.json** and add it to the root of this repository.
+   Then in Firebase: Project settings → Service accounts → **Generate new private key**, and upload that file in
+   expo.dev → your project → **Credentials → Android → FCM V1 service account key**. (That key is secret: upload it
+   only there, never into GitHub or a chat.)
+3. Push any change (or Actions → Build Android app → Run workflow). The new build registers each phone for push,
+   and the server already sends SOS alerts through Expo's push service.
 
 ---
 
@@ -113,18 +147,18 @@ The two phones need to be within ~2 miles of each other (or use "Widen search" f
 
 ## What still needs a developer before a public launch
 
-This is a working MVP, not a finished product. In the Expo Go test setup, **alerts only arrive while the
-responder has the app open.** Closing that gap is the most important next step.
+This is a working MVP, not a finished product. The most important next step is push notifications (above), so
+alerts reach responders even after the app has been fully closed.
 
 | Item | Why it matters | Effort |
 |---|---|---|
-| **Alerts when the app is closed** | Push notifications need a "development build" instead of Expo Go: `npx eas-cli@latest init` (adds a project ID), `npx eas-cli@latest build:configure`, then `npx eas-cli@latest build --profile development`. The push-sending code is already written and tested. | ~1 day |
+| **Alerts when the app is closed** | Code done; needs the Expo + Firebase accounts described above. | ~1 hour once accounts exist |
 | **iOS Critical Alerts** | Lets SOS alerts sound even on silent / Do Not Disturb. Requires applying to Apple for a special entitlement — worth doing early, approval takes time. | Apply now |
-| **Background location** | Today a carrier's location refreshes whenever they open the app (and is trusted for 3 hours). Background updates keep responders matchable all day. Needs extra App Store / Play review justification. | 2–4 days |
+| **Background location review** | Built. Google Play and Apple require a written justification and a short video of the "Allow all the time" explanation screen when you submit. | 1 day |
 | **Store accounts + release** | Apple Developer ($99/yr), Google Play ($25 once), app icons, store listings, a Google Maps API key for Android (`react-native-maps` plugin in `app.json`). | 1–2 weeks |
-| **Password reset, email confirmation, phone verification** | Account basics. Supabase supports all of them. | 1–3 days |
+| **Email confirmation + own email sender, phone verification** | Password reset is built. Turn email confirmation back on with your own SMTP sender; phone verification is optional. | 1 day |
 | **Legal content** | Terms, Privacy Policy, waiver, state-by-state summaries for the Safety & legal screen (currently a marked placeholder). From a lawyer, not a developer. | — |
-| **Admin view, analytics, abuse handling** | Seeing alerts in your pilot, blocking bad actors. | 1–2 weeks |
+| **Medical review** | Have an allergist or EMS professional review the first-aid text on the Safety screen. | — |
 
 ---
 
@@ -155,8 +189,14 @@ These were deliberate; change them only after thinking them through.
 - **Backend:** everything is in `supabase/schema.sql` — tables, row-level-security policies, and `security definer`
   RPCs. Matching uses a haversine distance with a lat/lng bounding box; switch to PostGIS when you outgrow it.
   Push goes out from Postgres via `pg_net` → Expo Push API. Tuning knobs are in `public._cfg()`.
-- **Tests:** `supabase/test` runs the schema against embedded Postgres with Supabase-like stubs and checks 52
-  behaviours (matching, privacy, races, permissions). `cd supabase/test && npm install && npm test`.
+- **Tests:** `supabase/test` runs the schema against embedded Postgres with Supabase-like stubs and checks 70
+  behaviours (matching, privacy, races, permissions, reports, suspensions, rate limits).
+  `cd supabase/test && npm install && npm test`. CI also opens every APK on an Android emulator
+  (`.github/scripts/launch-test.sh`) before publishing; `diagnose.yml` re-runs that on any release and prints crash logs.
+- **Live server:** Supabase project `epirelay` (`nwmncmdqdooetjwzkueq`). `schema.sql` is the full setup for a fresh
+  project; the live project was set up with the same SQL in parts, minus `add-account-deletion.sql`.
+- **Background location:** `src/lib/backgroundLocation.ts` (expo-task-manager + foreground service); errors are
+  reported to `public.app_errors` by `src/lib/errors.ts` and the root `ErrorBoundary`.
 - **App:** routes in `src/app/` (`index` = home/SOS, `sos/[id]` = person in need, `respond/[id]` = responder),
   shared code in `src/lib/`, components in `src/components/`. `npm run typecheck` and `npx expo lint` both pass.
 - **Real-time:** screens use Supabase Realtime for instant updates with a 4-second polling fallback

@@ -1,3 +1,4 @@
+import * as Linking from 'expo-linking';
 import { useState } from 'react';
 import { KeyboardAvoidingView, Platform, View } from 'react-native';
 
@@ -43,6 +44,23 @@ export default function SignIn() {
     }
   };
 
+  const forgotPassword = async () => {
+    setMessage(null);
+    if (!email.includes('@')) {
+      return setMessage({ tone: 'danger', text: 'Type your email address above first, then tap “Forgot password?”.' });
+    }
+    setBusy(true);
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: Linking.createURL('/reset-password'),
+    });
+    setBusy(false);
+    setMessage(
+      error
+        ? { tone: 'danger', text: error.message }
+        : { tone: 'ok', text: 'If that email has an account, we’ve sent a reset link. Open it on this phone.' },
+    );
+  };
+
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <Screen edges={['top', 'bottom']}>
@@ -83,6 +101,7 @@ export default function SignIn() {
         )}
 
         <Button title={mode === 'sign-up' ? 'Create account' : 'Sign in'} onPress={submit} loading={busy} />
+        {mode === 'sign-in' && <Button kind="ghost" title="Forgot password?" onPress={forgotPassword} />}
         <Button
           kind="ghost"
           title={mode === 'sign-up' ? 'I already have an account' : 'Create a new account'}

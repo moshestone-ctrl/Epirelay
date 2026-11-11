@@ -5,6 +5,7 @@ import { Alert, View } from 'react-native';
 
 import { AlertMap } from '@/components/AlertMap';
 import { ChatPanel } from '@/components/ChatPanel';
+import { ReportPanel } from '@/components/ReportPanel';
 import { Badge, Button, Card, Loading, Screen, T } from '@/components/ui';
 import { api, errorMessage } from '@/lib/api';
 import { EMERGENCY_NUMBER, RESPONDER_POSITION_MS } from '@/lib/config';
@@ -75,7 +76,9 @@ export default function RespondScreen() {
             ? 'Enough people are already on the way. Thank you!'
             : r.reason === 'closed'
               ? 'This alert has already ended.'
-              : 'Something went wrong.';
+              : r.reason === 'suspended'
+                ? 'Your account is suspended, so you can’t respond to alerts.'
+                : 'Something went wrong.';
         Alert.alert('Update', msg);
       }
       await refresh();
@@ -184,6 +187,7 @@ export default function RespondScreen() {
           <Button kind="ghost" title="I can’t make it" onPress={withdraw} loading={busy === 'withdraw'} />
         </>
       )}
+      <ReportPanel alertId={id} />
     </Screen>
   );
 }

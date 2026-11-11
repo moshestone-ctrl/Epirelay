@@ -5,16 +5,18 @@ import { Vibration } from 'react-native';
 
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { hasAlwaysPermission, startBackgroundLocation, stopBackgroundLocation } from '@/lib/backgroundLocation';
 import { LOCATION_HEARTBEAT_MS } from '@/lib/config';
 import { useInterval, useRealtime } from '@/lib/hooks';
 import { ensureLocationPermission, getCurrentCoords } from '@/lib/location';
 import { alertNow, registerPushToken } from '@/lib/notifications';
 
 /**
- * Invisible helpers that run while a signed-in user has the app open:
+ * Invisible helpers that run while a signed-in user has the app open (or running in the background):
  *  • registers the phone for push alerts
  *  • keeps an available carrier's location fresh so they can be matched
- *  • pops up an SOS the moment one arrives (works in Expo Go too)
+ *    (in the background too, once "Allow all the time" is granted)
+ *  • sounds an SOS the moment one arrives
  *  • opens the right screen when a notification is tapped
  */
 export function BackgroundServices() {
@@ -46,6 +48,17 @@ export function BackgroundServices() {
     if (isResponder) heartbeat();
   }, [isResponder]);
   useInterval(heartbeat, LOCATION_HEARTBEAT_MS, isResponder);
+
+  // 2b. Background updates: on while "Available" (if "Allow all the time" was granted), off otherwise.
+  useEffect(() => {
+    (async () => {
+      if (isResponder) {
+        if (await hasAlwaysPermission()) await startBackgroundLocation(false);
+      } else {
+        await stopBackgroundLocation();
+      }
+    })();
+  }, [isResponder]);
 
   // 3. Live SOS invitations while the app is open
   useRealtime(

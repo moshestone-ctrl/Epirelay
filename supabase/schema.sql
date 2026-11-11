@@ -33,8 +33,10 @@ language sql immutable set search_path = '' as $$
     when 'widen_radius_m'         then 8000   -- "Widen search" button (~5 mi)
     when 'max_notified_per_round' then 30     -- cap on alerts sent per round
     when 'max_en_route'           then 3      -- how many responders can head over at once
-    when 'location_fresh_minutes' then 180    -- ignore carriers whose location is older than this
+    when 'location_fresh_minutes' then 30     -- ignore carriers whose location is older than this (they're likely unreachable)
     when 'alert_ttl_minutes'      then 120    -- active alerts auto-close after this
+    when 'max_alerts_per_hour'      then 6    -- real SOS alerts one person can send per hour
+    when 'max_test_alerts_per_hour' then 10   -- practice alerts one person can send per hour
   end)::numeric
 $$;
 
@@ -147,6 +149,39 @@ create table public.feedback (
   unique (alert_id, author_id)
 );
 
+-- Safety tools ---------------------------------------------------------
+
+-- People blocked from sending SOS alerts or responding (e.g. after fake alerts).
+-- Managed by the team from the Supabase dashboard; the app can't read or change it.
+create table public.suspended_users (
+  user_id    uuid primary key references public.profiles(id) on delete cascade,
+  reason     text check (char_length(reason) <= 500),
+  created_at timestamptz not null default now()
+);
+
+-- Responders flag an SOS they believe was fake or abusive.
+create table public.alert_reports (
+  alert_id    uuid not null references public.alerts(id) on delete cascade,
+  reporter_id uuid not null references public.profiles(id) on delete cascade,
+  reason      text not null check (reason in ('fake', 'no_one_there', 'abusive', 'other')),
+  note        text check (char_length(note) <= 500),
+  created_at  timestamptz not null default now(),
+  primary key (alert_id, reporter_id)
+);
+
+-- Crash and error reports sent by the app.
+create table public.app_errors (
+  id          bigint generated always as identity primary key,
+  user_id     uuid default auth.uid() references public.profiles(id) on delete set null,
+  message     text not null check (char_length(message) <= 2000),
+  stack       text check (char_length(stack) <= 8000),
+  context     text check (char_length(context) <= 200),
+  platform    text check (char_length(platform) <= 40),
+  app_version text check (char_length(app_version) <= 40),
+  created_at  timestamptz not null default now()
+);
+create index app_errors_created_idx on public.app_errors (created_at desc);
+
 
 -- ---------------------------------------------------------------------
 --  Triggers
@@ -203,12 +238,21 @@ language sql stable security definer set search_path = '' as $$
        and r.status in ('en_route', 'arrived', 'withdrawn'))
 $$;
 
+-- Is the signed-in user suspended?
+create or replace function public._am_i_suspended() returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (select 1 from public.suspended_users s where s.user_id = (select auth.uid()))
+$$;
+
 alter table public.profiles            enable row level security;
 alter table public.responder_locations enable row level security;  -- no policies: RPC access only
 alter table public.alerts              enable row level security;
 alter table public.alert_recipients    enable row level security;
 alter table public.messages            enable row level security;
 alter table public.feedback            enable row level security;
+alter table public.suspended_users     enable row level security;  -- no policies: dashboard only
+alter table public.alert_reports       enable row level security;  -- no policies: RPC only
+alter table public.app_errors          enable row level security;
 
 create policy "read own profile"   on public.profiles for select to authenticated
   using (id = (select auth.uid()));
@@ -230,7 +274,11 @@ create policy "active parties send messages" on public.messages for insert to au
     sender_id = (select auth.uid())
     and (public._is_requester(alert_id) or public._is_active_responder(alert_id))
     and exists (select 1 from public.alerts a where a.id = alert_id and a.status = 'active')
+    and not public._am_i_suspended()
   );
+
+create policy "send own error reports" on public.app_errors for insert to authenticated
+  with check (user_id = (select auth.uid()));
 
 create policy "parties leave feedback" on public.feedback for insert to authenticated
   with check (author_id = (select auth.uid()) and public._is_party(alert_id));
@@ -241,11 +289,13 @@ create policy "read own feedback" on public.feedback for select to authenticated
 -- needs (row-level security above then limits *which* rows). Everything else goes through
 -- the functions below.
 revoke all on public.profiles, public.responder_locations, public.alerts,
-              public.alert_recipients, public.messages, public.feedback from anon, authenticated;
+              public.alert_recipients, public.messages, public.feedback,
+              public.suspended_users, public.alert_reports, public.app_errors from anon, authenticated;
 grant usage on schema public to authenticated;
 grant select, update on public.profiles to authenticated;
 grant select on public.alerts, public.alert_recipients to authenticated;
 grant select, insert on public.messages, public.feedback to authenticated;
+grant insert on public.app_errors to authenticated;
 
 
 -- ---------------------------------------------------------------------
@@ -285,6 +335,7 @@ language sql stable security definer set search_path = '' as $$
      and p.available_to_respond
      and (p.device_expires_on is null or p.device_expires_on >= current_date)
      and p.id is distinct from p_exclude
+     and not exists (select 1 from public.suspended_users s where s.user_id = p.id)
      and d.m <= p_radius_m
 $$;
 
@@ -371,8 +422,12 @@ declare
   v_existing public.alerts;
   v_id       uuid;
   v_count    int;
+  v_recent   int;
 begin
   if v_uid is null then raise exception 'Not signed in'; end if;
+  if public._am_i_suspended() then
+    raise exception 'This account is suspended and can''t send alerts.';
+  end if;
   perform public._expire_stale_alerts();
 
   select * into v_existing from public.alerts
@@ -381,6 +436,15 @@ begin
   if found then
     return jsonb_build_object('alert_id', v_existing.id,
                               'notified', v_existing.notified_count, 'existing', true);
+  end if;
+
+  -- Rate limit to stop alert spam (generous, so a real emergency is never blocked by retries).
+  select count(*) into v_recent from public.alerts
+   where requester_id = v_uid and is_test = coalesce(p_is_test, false)
+     and created_at > now() - interval '1 hour';
+  if v_recent >= public._cfg(case when coalesce(p_is_test, false)
+                                  then 'max_test_alerts_per_hour' else 'max_alerts_per_hour' end) then
+    raise exception 'Too many alerts in the last hour.';
   end if;
 
   insert into public.alerts (requester_id, lat, lng, note, is_test, radius_m)
@@ -433,6 +497,9 @@ begin
   end if;
   if a.status <> 'active' then
     return jsonb_build_object('ok', false, 'reason', 'closed');
+  end if;
+  if p_accept and public._am_i_suspended() then
+    return jsonb_build_object('ok', false, 'reason', 'suspended');
   end if;
 
   if not p_accept then
@@ -614,6 +681,28 @@ begin
          and r.status in ('notified', 'en_route', 'arrived')), '[]'::jsonb));
 end $$;
 
+-- Responder: flag an SOS as fake / nobody there / abusive. Only people who were alerted can report.
+create or replace function public.report_alert(p_alert_id uuid, p_reason text, p_note text default null)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+begin
+  if p_reason not in ('fake', 'no_one_there', 'abusive', 'other') then raise exception 'Invalid reason'; end if;
+  if not exists (select 1 from public.alert_recipients r
+                  where r.alert_id = p_alert_id and r.user_id = auth.uid()) then
+    return jsonb_build_object('ok', false, 'reason', 'not_invited');
+  end if;
+  insert into public.alert_reports (alert_id, reporter_id, reason, note)
+  values (p_alert_id, auth.uid(), p_reason, nullif(btrim(left(p_note, 500)), ''))
+  on conflict (alert_id, reporter_id) do update
+    set reason = excluded.reason, note = excluded.note, created_at = now();
+  return jsonb_build_object('ok', true);
+end $$;
+
+-- Health check used by the daily keep-awake job (stops the free server from pausing).
+create or replace function public.ping() returns timestamptz
+language sql stable set search_path = '' as $$
+  select now()
+$$;
+
 -- In-app account deletion (required by the App Store).
 create or replace function public.delete_my_account() returns void
 language plpgsql security definer set search_path = '' as $$
@@ -656,21 +745,29 @@ from public, anon, authenticated;
 
 revoke execute on function
   public._is_requester(uuid), public._is_active_responder(uuid), public._is_party(uuid),
+  public._am_i_suspended(),
   public.update_my_location(float8, float8), public.nearby_responder_count(float8, float8),
   public.create_alert(float8, float8, text, boolean), public.widen_alert(uuid),
   public.respond_to_alert(uuid, boolean), public.update_responder_position(uuid, float8, float8),
   public.set_responder_status(uuid, text), public.close_alert(uuid, text),
-  public.get_alert(uuid), public.my_alerts(), public.delete_my_account()
+  public.get_alert(uuid), public.my_alerts(), public.report_alert(uuid, text, text),
+  public.delete_my_account()
 from public, anon;
 
 grant execute on function
   public._is_requester(uuid), public._is_active_responder(uuid), public._is_party(uuid),
+  public._am_i_suspended(),
   public.update_my_location(float8, float8), public.nearby_responder_count(float8, float8),
   public.create_alert(float8, float8, text, boolean), public.widen_alert(uuid),
   public.respond_to_alert(uuid, boolean), public.update_responder_position(uuid, float8, float8),
   public.set_responder_status(uuid, text), public.close_alert(uuid, text),
-  public.get_alert(uuid), public.my_alerts(), public.delete_my_account()
+  public.get_alert(uuid), public.my_alerts(), public.report_alert(uuid, text, text),
+  public.delete_my_account()
 to authenticated;
+
+-- The keep-awake health check is the one thing logged-out callers may run.
+revoke execute on function public.ping() from public;
+grant execute on function public.ping() to anon, authenticated;
 
 
 -- ---------------------------------------------------------------------

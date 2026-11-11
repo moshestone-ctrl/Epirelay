@@ -3,8 +3,10 @@
 #
 # Run it by hand: GitHub → your repo → Actions → "Build Android app" → Run workflow.
 #
-# Optional repository secrets (Settings → Secrets and variables → Actions):
-#   GOOGLE_MAPS_ANDROID_API_KEY   turns on the in-app map (see README)
+# Optional settings (repo Settings → Secrets and variables → Actions):
+#   secret   GOOGLE_MAPS_ANDROID_API_KEY   turns on the in-app map (see README)
+#   variable EAS_PROJECT_ID                Expo project ID; with google-services.json in the repo,
+#                                          turns on alerts that arrive while the app is closed
 
 name: Build Android app
 
@@ -50,6 +52,7 @@ jobs:
     env:
       APP_VERSION_CODE: ${{ github.run_number }}
       GOOGLE_MAPS_ANDROID_API_KEY: ${{ secrets.GOOGLE_MAPS_ANDROID_API_KEY }}
+      EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
     steps:
       - uses: actions/checkout@v7
 
