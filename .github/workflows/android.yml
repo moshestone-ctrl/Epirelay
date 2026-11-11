@@ -66,9 +66,13 @@ jobs:
       - run: npm ci
 
       - name: Check the backend is configured
+        id: cfg
         run: |
           if grep -q "YOUR-PROJECT" .env; then
-            echo "::warning::.env still has placeholder values — the app will open on a 'not connected to a server' screen."
+            echo "::warning::.env still has placeholder values, so this build is not published as a Release (it would open on a 'not connected to a server' screen)."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Generate native Android project
@@ -96,6 +100,7 @@ jobs:
           retention-days: 30
 
       - name: Publish as a GitHub Release
+        if: steps.cfg.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
