@@ -9,9 +9,12 @@ import { APP_NAME, EMERGENCY_NUMBER, TERMS_VERSION } from '@/lib/config';
 import { radius, space, useTheme } from '@/lib/theme';
 
 const ACKS = [
+  'I am 18 or older.',
   `${APP_NAME} does not replace emergency services. In an emergency I will always call ${EMERGENCY_NUMBER}.`,
   'Responders are volunteers. Nobody is guaranteed to come, or to arrive in time.',
   'Responders bring epinephrine and hand it over. The person who needs it — or someone with them — uses it, following the instructions on the device.',
+  'If I go to help, I never have to go inside. I hand the device over at the door or somewhere I can be seen, and I leave if anything feels wrong.',
+  `I will only send an SOS in a real emergency. False alerts put responders at risk and get accounts suspended.`,
   'Laws about sharing prescription medicine vary by state. I have read the Safety & legal page.',
 ];
 

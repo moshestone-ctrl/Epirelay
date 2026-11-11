@@ -7,7 +7,10 @@ async function rpc<T>(fn: string, args?: Record<string, unknown>): Promise<T> {
   return data as T;
 }
 
-type Result = { ok: boolean; reason?: 'closed' | 'not_invited' | 'enough_help' | 'not_responding' | 'suspended' };
+export type Result = {
+  ok: boolean;
+  reason?: 'closed' | 'not_invited' | 'enough_help' | 'not_responding' | 'suspended' | 'verify_phone';
+};
 
 /** Thin wrappers around the database functions in supabase/schema.sql. */
 export const api = {
@@ -45,6 +48,13 @@ export const api = {
     rpc<Result>('report_alert', { p_alert_id: alertId, p_reason: reason, p_note: note ?? null }),
 
   myAlerts: () => rpc<MyAlerts>('my_alerts'),
+
+  /** Responder safety check-in: "I'm safe, I've left" (stillThere=false) or "I'm OK, still helping" (true). */
+  confirmResponderSafe: (alertId: string, stillThere = false) =>
+    rpc<Result>('confirm_responder_safe', { p_alert_id: alertId, p_still_there: stillThere }),
+
+  /** "I feel unsafe": stops your response, texts your emergency contact, and flags the SOS. */
+  responderUnsafe: (alertId: string) => rpc<Result>('responder_unsafe', { p_alert_id: alertId }),
 
   deleteMyAccount: () => rpc<void>('delete_my_account'),
 };

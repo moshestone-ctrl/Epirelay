@@ -1,5 +1,5 @@
 import { Badge, Button, Card, Screen, T } from '@/components/ui';
-import { APP_NAME, EMERGENCY_NUMBER } from '@/lib/config';
+import { APP_NAME, CHECKIN_MINUTES, EMERGENCY_NUMBER } from '@/lib/config';
 import { callEmergency } from '@/lib/location';
 
 export default function Safety() {
@@ -25,6 +25,37 @@ export default function Safety() {
         <T>• Responders hand over the device. The person who needs it — or someone with them — uses it.</T>
         <T>• Up to 3 responders can come at once, in case a second dose is needed.</T>
         <T>• Nobody can see where carriers are. The app only shows how many are nearby.</T>
+        <T>
+          • The person who sent the SOS sees a responder on the map only once they’re within about ¼ mile — never
+          where they set off from — and only their first name.
+        </T>
+      </Card>
+
+      <Card>
+        <T kind="heading">Your safety as a responder</T>
+        <T>• Only go if you feel safe. You can always say no.</T>
+        <T>• You never have to go inside. Hand the device over at the door, or ask to meet somewhere you can be seen.</T>
+        <T>
+          • Before you decide, you’ll see whether the person’s phone number is verified, how long they’ve been a member,
+          and whether their earlier SOS alerts ended with help arriving.
+        </T>
+        <T>
+          • While you’re helping, we check on you every {CHECKIN_MINUTES} minutes. If you don’t answer, we text your
+          emergency contact where you are.
+        </T>
+        <T>
+          • If anything feels wrong, leave and tap “I feel unsafe”. We stop your response, text your emergency contact
+          right away, and put the sender’s account on hold while we review it.
+        </T>
+      </Card>
+
+      <Card>
+        <T kind="heading">Stopping fake and abusive alerts</T>
+        <T>• Everyone must be 18 or older.</T>
+        <T>• Phone numbers are verified by text message.</T>
+        <T>• New accounts can send practice alerts only for their first 24 hours.</T>
+        <T>• An account is put on hold automatically after a report of abuse, or after reports from two different people.</T>
+        <T>• Sending too many alerts in a short time is blocked.</T>
       </Card>
 
       <Card tone="warn">

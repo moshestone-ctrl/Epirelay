@@ -7,29 +7,50 @@ import { AlertMap } from '@/components/AlertMap';
 import { ChatPanel } from '@/components/ChatPanel';
 import { ReportPanel } from '@/components/ReportPanel';
 import { Badge, Button, Card, Loading, Screen, T } from '@/components/ui';
-import { api, errorMessage } from '@/lib/api';
-import { EMERGENCY_NUMBER, RESPONDER_POSITION_MS } from '@/lib/config';
+import { api, errorMessage, type Result } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
+import { CHECKIN_MINUTES, EMERGENCY_NUMBER, RESPONDER_POSITION_MS } from '@/lib/config';
 import { useAlert } from '@/lib/hooks';
-import { callEmergency, distanceMeters, ensureLocationPermission, formatDistance, openDirections, timeAgo } from '@/lib/location';
-import { space } from '@/lib/theme';
+import {
+  callEmergency,
+  clockTime,
+  distanceMeters,
+  ensureLocationPermission,
+  formatDistance,
+  getCurrentCoords,
+  joinedText,
+  openDirections,
+  timeAgo,
+} from '@/lib/location';
+import { cancelSafetyCheckin, scheduleSafetyCheckin } from '@/lib/notifications';
+import { space, useTheme } from '@/lib/theme';
 import type { Coords } from '@/lib/types';
 
-/** A carrier who was alerted: accept, navigate, hand over. */
+/** A carrier who was alerted: decide, go, hand over — with safety check-ins until they're back. */
 export default function RespondScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const { profile } = useAuth();
   const { view, loaded, refresh } = useAlert(id);
   const [busy, setBusy] = useState<string | null>(null);
   const [myPos, setMyPos] = useState<Coords | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const lastSent = useRef(0);
 
   const responderView = view?.role === 'responder' ? view : null;
-  const onTheWay =
-    responderView?.alert.status === 'active' &&
-    (responderView.my_status === 'en_route' || responderView.my_status === 'arrived');
+  const safety = responderView?.safety;
+  const going = responderView?.my_status === 'en_route' || responderView?.my_status === 'arrived';
+  // Keep sharing your position until you say you're safe, so your emergency contact
+  // can be told where you were if you stop answering.
+  const sharePosition = Boolean(going && safety?.needs_confirmation);
+  const dueAt = safety?.checkin_due_at ?? null;
 
-  // Share live position while on the way.
   useEffect(() => {
-    if (!onTheWay) return;
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!sharePosition) return;
     let sub: Location.LocationSubscription | null = null;
     let cancelled = false;
     (async () => {
@@ -51,10 +72,17 @@ export default function RespondScreen() {
       cancelled = true;
       sub?.remove();
     };
-  }, [onTheWay, id]);
+  }, [sharePosition, id]);
+
+  // Phone reminders for the next safety check-in.
+  useEffect(() => {
+    if (!loaded) return;
+    if (dueAt) scheduleSafetyCheckin(id, dueAt).catch(() => {});
+    else cancelSafetyCheckin(id).catch(() => {});
+  }, [loaded, id, dueAt]);
 
   if (!loaded) return <Loading />;
-  if (!responderView) {
+  if (!responderView || !safety) {
     return (
       <Screen>
         <T>This alert isn’t available to you.</T>
@@ -65,52 +93,155 @@ export default function RespondScreen() {
 
   const { alert, my_status: status, requester } = responderView;
   const active = alert.status === 'active';
+  const hasContact = Boolean(profile?.emergency_contact_phone);
 
-  const act = async (key: string, fn: () => Promise<{ ok: boolean; reason?: string }>) => {
+  const act = async (key: string, fn: () => Promise<Result>) => {
     setBusy(key);
     try {
       const r = await fn();
       if (!r.ok) {
-        const msg =
-          r.reason === 'enough_help'
-            ? 'Enough people are already on the way. Thank you!'
-            : r.reason === 'closed'
-              ? 'This alert has already ended.'
-              : r.reason === 'suspended'
-                ? 'Your account is suspended, so you can’t respond to alerts.'
-                : 'Something went wrong.';
-        Alert.alert('Update', msg);
+        if (r.reason === 'verify_phone') {
+          Alert.alert('Verify your phone first', 'To respond to alerts, verify your phone number. It takes about a minute.', [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'Verify now', onPress: () => router.push('/verify-phone') },
+          ]);
+        } else {
+          const msg =
+            r.reason === 'enough_help'
+              ? 'Enough people are already on the way. Thank you!'
+              : r.reason === 'closed'
+                ? 'This alert has already ended.'
+                : r.reason === 'suspended'
+                  ? 'Your account is on hold, so you can’t respond to alerts right now.'
+                  : 'Something went wrong.';
+          Alert.alert('Update', msg);
+        }
       }
       await refresh();
+      return r;
     } catch (e) {
       Alert.alert('Something went wrong', errorMessage(e));
+      return null;
     } finally {
       setBusy(null);
     }
   };
 
-  const accept = () => act('accept', () => api.respond(id, true));
-  const decline = () =>
-    act('decline', async () => {
-      const r = await api.respond(id, false);
-      router.replace('/');
-      return r;
-    });
+  const accept = async () => {
+    const r = await act('accept', () => api.respond(id, true));
+    if (r?.ok && !hasContact) {
+      Alert.alert(
+        'Add an emergency contact',
+        `We’ll check on you every ${CHECKIN_MINUTES} minutes while you help. If you don’t answer, we text your ` +
+          'emergency contact where you are. Add someone now — it takes a few seconds.',
+        [
+          { text: 'Later', style: 'cancel' },
+          { text: 'Add now', onPress: () => router.push('/profile') },
+        ],
+      );
+    }
+  };
+  const decline = async () => {
+    await act('decline', () => api.respond(id, false));
+    router.replace('/');
+  };
   const arrived = () => act('arrived', () => api.setResponderStatus(id, 'arrived'));
   const withdraw = () =>
     Alert.alert('Can’t make it?', 'The person will be told so they can look for someone else.', [
       { text: 'Keep going', style: 'cancel' },
       { text: 'I can’t make it', style: 'destructive', onPress: () => act('withdraw', () => api.setResponderStatus(id, 'withdrawn')) },
     ]);
-  const resolve = () =>
-    act('resolve', async () => {
-      const r = await api.closeAlert(id, 'resolved');
-      router.replace(`/feedback/${id}`);
-      return r;
-    });
+  const resolve = async () => {
+    const r = await act('resolve', () => api.closeAlert(id, 'resolved'));
+    if (r?.ok) router.replace(`/feedback/${id}`);
+  };
+  const checkIn = () => act('checkin', () => api.confirmResponderSafe(id, true));
+  const safeLeft = async () => {
+    const r = await act('safe', () => api.confirmResponderSafe(id, false));
+    if (r?.ok) {
+      cancelSafetyCheckin(id).catch(() => {});
+      if (!active) router.replace(`/feedback/${id}`);
+    }
+  };
+
+  const reportUnsafe = async (call911: boolean) => {
+    if (call911) callEmergency();
+    setBusy('unsafe');
+    try {
+      // Send the freshest position first, so the text to your contact shows where you are now.
+      const c = await getCurrentCoords(4000).catch(() => myPos);
+      if (c) await api.updateResponderPosition(id, c.latitude, c.longitude).catch(() => {});
+      await api.responderUnsafe(id);
+      cancelSafetyCheckin(id).catch(() => {});
+      await refresh();
+    } catch (e) {
+      Alert.alert('Couldn’t reach EpiRelay', `${errorMessage(e)}\n\nIf you’re in danger, call ${EMERGENCY_NUMBER}.`, [
+        { text: `Call ${EMERGENCY_NUMBER}`, style: 'destructive', onPress: callEmergency },
+        { text: 'OK' },
+      ]);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const unsafe = () =>
+    Alert.alert(
+      'Get somewhere safe',
+      'Leave now and go somewhere public. We’ll stop your response, text your emergency contact where you are, ' +
+        'and flag this SOS for review. The person who sent it won’t be told why you left.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Alert my contact', onPress: () => reportUnsafe(false) },
+        { text: `Call ${EMERGENCY_NUMBER} + alert`, style: 'destructive', onPress: () => reportUnsafe(true) },
+      ],
+    );
 
   const target = alert.lat !== null && alert.lng !== null ? { latitude: alert.lat, longitude: alert.lng } : null;
   const liveDistance = target && myPos ? distanceMeters(myPos, target) : alert.distance_m;
+  const overdue = dueAt !== null && new Date(dueAt).getTime() <= now;
+
+  const safetyCard = (
+    <Card tone={overdue ? 'danger' : undefined}>
+      <T kind="label">Your safety</T>
+      <T>
+        {overdue
+          ? 'Check-in overdue. Tap a button below, or we’ll text your emergency contact.'
+          : dueAt
+            ? `Next check-in by ${clockTime(dueAt)}. We’ll remind you.`
+            : 'Let us know when you’re safe.'}
+      </T>
+      {!hasContact && (
+        <View style={{ gap: space.sm }}>
+          <T kind="small">You haven’t added an emergency contact, so nobody can be told if you don’t check in.</T>
+          <Button kind="secondary" title="Add emergency contact" onPress={() => router.push('/profile')} />
+        </View>
+      )}
+      {active && <Button kind="secondary" title="I’m OK — still here" onPress={checkIn} loading={busy === 'checkin'} />}
+      <Button kind="primary" title="I’m safe — I’ve left" onPress={safeLeft} loading={busy === 'safe'} />
+      <Button kind="danger" title="I feel unsafe" onPress={unsafe} loading={busy === 'unsafe'} />
+    </Card>
+  );
+
+  // After "I feel unsafe"
+  if (safety.felt_unsafe_at) {
+    return (
+      <Screen>
+        <Card tone="danger">
+          <T kind="heading">Get somewhere safe</T>
+          <T>Your response has stopped and this SOS has been flagged for review.</T>
+          <T>
+            {!hasContact
+              ? 'You don’t have an emergency contact saved — call someone you trust.'
+              : safety.escalated_at
+                ? 'We’ve texted your emergency contact where you are.'
+                : 'We’re texting your emergency contact where you are now.'}
+          </T>
+          <T>If you’re in danger, call {EMERGENCY_NUMBER}.</T>
+          <Button kind="danger" title={`Call ${EMERGENCY_NUMBER}`} onPress={callEmergency} />
+        </Card>
+        <Button kind="secondary" title="Go home" onPress={() => router.replace('/')} />
+      </Screen>
+    );
+  }
 
   return (
     <Screen>
@@ -120,14 +251,17 @@ export default function RespondScreen() {
       </View>
 
       {!active ? (
-        <Card tone="ok">
-          <T kind="heading">This alert has ended</T>
-          <T>Thank you for being ready to help.</T>
-          {(status === 'en_route' || status === 'arrived' || status === 'withdrawn') && (
-            <Button title="Leave quick feedback" onPress={() => router.replace(`/feedback/${id}`)} />
-          )}
-          <Button kind="secondary" title="Go home" onPress={() => router.replace('/')} />
-        </Card>
+        <>
+          <Card tone="ok">
+            <T kind="heading">This alert has ended</T>
+            <T>Thank you for being ready to help.</T>
+            {(status === 'en_route' || status === 'arrived' || status === 'withdrawn') && !safety.needs_confirmation && (
+              <Button title="Leave quick feedback" onPress={() => router.replace(`/feedback/${id}`)} />
+            )}
+            {!safety.needs_confirmation && <Button kind="secondary" title="Go home" onPress={() => router.replace('/')} />}
+          </Card>
+          {safety.needs_confirmation && safetyCard}
+        </>
       ) : status === 'notified' || status === 'declined' || status === 'withdrawn' ? (
         <>
           <Card tone="danger">
@@ -141,6 +275,16 @@ export default function RespondScreen() {
               </T>
             )}
           </Card>
+
+          <TrustCard
+            now={now}
+            phoneVerified={requester.phone_verified}
+            memberSince={requester.member_since}
+            pastResolved={requester.past_resolved}
+          />
+
+          <HandOverRules />
+
           <T kind="muted">
             If you go, bring your epinephrine. You’ll see the exact location after you tap “I’m on my way”.
           </T>
@@ -175,11 +319,14 @@ export default function RespondScreen() {
 
           <Card tone="warn">
             <T kind="heading">When you get there</T>
-            <T>• Hand the device to the person, or someone with them, so they can use it — following the instructions printed on it.</T>
+            <T>• You never have to go inside. Hand the device over at the door, or somewhere you can be seen.</T>
+            <T>• The person — or someone with them — uses it, following the instructions printed on it.</T>
             <T>• Make sure someone has called {EMERGENCY_NUMBER}. If not, call now.</T>
-            <T>• Stay until paramedics arrive if you can. Symptoms can come back.</T>
+            <T>• Stay nearby until paramedics arrive if you feel safe doing so. Symptoms can come back.</T>
             <Button kind="secondary" title={`Call ${EMERGENCY_NUMBER}`} onPress={callEmergency} />
           </Card>
+
+          {safety.needs_confirmation && safetyCard}
 
           <ChatPanel alertId={id} canSend nameFor={() => requester.name} placeholder="e.g. 2 minutes away" />
 
@@ -193,5 +340,55 @@ export default function RespondScreen() {
       )}
       <ReportPanel alertId={id} />
     </Screen>
+  );
+}
+
+/** What a responder can see about the person before deciding to go. */
+function TrustCard({
+  now,
+  phoneVerified,
+  memberSince,
+  pastResolved,
+}: {
+  now: number;
+  phoneVerified: boolean;
+  memberSince: string;
+  pastResolved: number;
+}) {
+  return (
+    <Card>
+      <T kind="label">About this request</T>
+      <TrustRow good={phoneVerified} text={phoneVerified ? 'Phone number verified' : 'Phone number not verified'} />
+      <TrustRow good={now - new Date(memberSince).getTime() > 7 * 86_400_000} text={joinedText(memberSince)} />
+      <TrustRow
+        good={pastResolved > 0}
+        text={
+          pastResolved > 0
+            ? `${pastResolved} earlier ${pastResolved === 1 ? 'SOS' : 'SOS alerts'} ended with help arriving`
+            : 'No earlier SOS alerts'
+        }
+      />
+    </Card>
+  );
+}
+
+function TrustRow({ good, text }: { good: boolean; text: string }) {
+  const t = useTheme();
+  return (
+    <View style={{ flexDirection: 'row', gap: space.sm, alignItems: 'center' }}>
+      <T style={{ color: good ? t.ok : t.muted, fontWeight: '800', width: 18 }}>{good ? '✓' : '•'}</T>
+      <T style={{ flex: 1 }}>{text}</T>
+    </View>
+  );
+}
+
+function HandOverRules() {
+  return (
+    <Card tone="warn">
+      <T kind="heading">Stay safe while you help</T>
+      <T>• You never have to go inside. Hand the device over at the door, or ask to meet somewhere you can be seen.</T>
+      <T>• We’ll check on you every {CHECKIN_MINUTES} minutes. If you don’t answer, we text your emergency contact.</T>
+      <T>• If anything feels wrong, leave and tap “I feel unsafe”.</T>
+    </Card>
   );
 }

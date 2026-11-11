@@ -37,6 +37,12 @@ language sql immutable set search_path = '' as $$
     when 'alert_ttl_minutes'      then 120    -- active alerts auto-close after this
     when 'max_alerts_per_hour'      then 6    -- real SOS alerts one person can send per hour
     when 'max_test_alerts_per_hour' then 10   -- practice alerts one person can send per hour
+    when 'privacy_zone_m'           then 400  -- the person in need sees a responder on the map only within this distance
+    when 'require_verified_phone'   then 0    -- 1 = a verified phone number is needed to send an SOS or respond
+    when 'new_account_hours'        then 24   -- brand-new accounts can only send practice alerts for this long
+    when 'checkin_minutes'          then 20   -- responders are asked "Are you OK?" this often
+    when 'checkin_grace_minutes'    then 10   -- ...and their emergency contact is texted if they don't answer in time
+    when 'auto_hold_reporters'      then 2    -- reports from this many different responders put the sender on hold
   end)::numeric
 $$;
 
@@ -126,6 +132,12 @@ create table public.alert_recipients (
   location_at  timestamptz,
   notified_at  timestamptz not null default now(),
   responded_at timestamptz,
+  -- Responder safety check-ins
+  last_checkin_at   timestamptz,   -- "I'm OK" (or accepting) — the next check is due after this
+  safe_confirmed_at timestamptz,   -- "I'm safe / I've left" — check-ins stop
+  felt_unsafe_at    timestamptz,   -- "I feel unsafe" — emergency contact is texted right away
+  escalated_at      timestamptz,   -- when we contacted their emergency contact
+  escalation_result text,
   primary key (alert_id, user_id)
 );
 create index alert_recipients_user_idx on public.alert_recipients (user_id, notified_at desc);
@@ -163,7 +175,7 @@ create table public.suspended_users (
 create table public.alert_reports (
   alert_id    uuid not null references public.alerts(id) on delete cascade,
   reporter_id uuid not null references public.profiles(id) on delete cascade,
-  reason      text not null check (reason in ('fake', 'no_one_there', 'abusive', 'other')),
+  reason      text not null check (reason in ('fake', 'no_one_there', 'abusive', 'unsafe', 'other')),
   note        text check (char_length(note) <= 500),
   created_at  timestamptz not null default now(),
   primary key (alert_id, reporter_id)
@@ -242,6 +254,19 @@ $$;
 create or replace function public._am_i_suspended() returns boolean
 language sql stable security definer set search_path = '' as $$
   select exists (select 1 from public.suspended_users s where s.user_id = (select auth.uid()))
+$$;
+
+-- Has this person verified their phone number by SMS code? (Supabase Auth keeps this in auth.users.)
+create or replace function public._phone_verified(p_uid uuid) returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (select 1 from auth.users u where u.id = p_uid and u.phone_confirmed_at is not null)
+$$;
+
+-- Was this account created less than new_account_hours ago?
+create or replace function public._is_new_account(p_uid uuid) returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (select 1 from public.profiles p where p.id = p_uid
+                  and p.created_at > now() - make_interval(hours => public._cfg('new_account_hours')::int))
 $$;
 
 alter table public.profiles            enable row level security;
@@ -336,6 +361,7 @@ language sql stable security definer set search_path = '' as $$
      and (p.device_expires_on is null or p.device_expires_on >= current_date)
      and p.id is distinct from p_exclude
      and not exists (select 1 from public.suspended_users s where s.user_id = p.id)
+     and (public._cfg('require_verified_phone') = 0 or public._phone_verified(p.id))
      and d.m <= p_radius_m
 $$;
 
@@ -428,6 +454,13 @@ begin
   if public._am_i_suspended() then
     raise exception 'This account is suspended and can''t send alerts.';
   end if;
+  if public._cfg('require_verified_phone') = 1 and not public._phone_verified(v_uid) then
+    raise exception 'Verify your phone number to send an SOS to people nearby.';
+  end if;
+  if not coalesce(p_is_test, false) and public._is_new_account(v_uid) then
+    raise exception 'New accounts can send practice alerts only, for the first % hours.',
+      public._cfg('new_account_hours')::int;
+  end if;
   perform public._expire_stale_alerts();
 
   select * into v_existing from public.alerts
@@ -501,6 +534,9 @@ begin
   if p_accept and public._am_i_suspended() then
     return jsonb_build_object('ok', false, 'reason', 'suspended');
   end if;
+  if p_accept and public._cfg('require_verified_phone') = 1 and not public._phone_verified(v_uid) then
+    return jsonb_build_object('ok', false, 'reason', 'verify_phone');
+  end if;
 
   if not p_accept then
     update public.alert_recipients set status = 'declined', responded_at = now()
@@ -518,7 +554,8 @@ begin
     return jsonb_build_object('ok', false, 'reason', 'enough_help');
   end if;
 
-  update public.alert_recipients set status = 'en_route', responded_at = now()
+  update public.alert_recipients
+     set status = 'en_route', responded_at = now(), last_checkin_at = now(), safe_confirmed_at = null
    where alert_id = p_alert_id and user_id = v_uid;
 
   select nullif(btrim(display_name), '') into v_name from public.profiles where id = v_uid;
@@ -555,7 +592,10 @@ declare
 begin
   if p_status not in ('arrived', 'withdrawn') then raise exception 'Invalid status'; end if;
 
-  update public.alert_recipients set status = p_status
+  update public.alert_recipients
+     set status = p_status,
+         safe_confirmed_at = case when p_status = 'withdrawn' and felt_unsafe_at is null
+                                  then coalesce(safe_confirmed_at, now()) else safe_confirmed_at end
    where alert_id = p_alert_id and user_id = auth.uid() and status in ('en_route', 'arrived');
   if not found then
     return jsonb_build_object('ok', false, 'reason', 'not_responding');
@@ -599,6 +639,9 @@ begin
     update public.alerts set status = p_outcome, closed_at = now(), closed_by = auth.uid()
      where id = a.id;
   end if;
+  -- A responder closing it themselves is also their "I'm safe".
+  update public.alert_recipients set safe_confirmed_at = coalesce(safe_confirmed_at, now())
+   where alert_id = a.id and user_id = auth.uid() and felt_unsafe_at is null;
   return jsonb_build_object('ok', true);
 end $$;
 
@@ -611,6 +654,7 @@ declare
   r     public.alert_recipients;
   req   public.profiles;
   v_active boolean;
+  v_zone   int := public._cfg('privacy_zone_m')::int;
 begin
   select * into a from public.alerts where id = p_alert_id;
   if not found then return null; end if;
@@ -623,17 +667,28 @@ begin
         'id', a.id, 'status', a.status, 'lat', a.lat, 'lng', a.lng, 'note', a.note,
         'is_test', a.is_test, 'radius_m', a.radius_m, 'notified_count', a.notified_count,
         'created_at', a.created_at, 'closed_at', a.closed_at),
+      'privacy_zone_m', v_zone,
       'responders', coalesce((
         select jsonb_agg(jsonb_build_object(
                  'user_id', rr.user_id,
-                 'name', coalesce(nullif(btrim(p.display_name), ''), 'Responder'),
+                 -- first name only
+                 'name', coalesce(nullif(split_part(btrim(p.display_name), ' ', 1), ''), 'Responder'),
                  'device_type', p.device_type,
                  'status', rr.status,
-                 'distance_m', case when rr.lat is null then rr.distance_m
-                                    else round(public._distance_m(a.lat, a.lng, rr.lat, rr.lng))::int end,
-                 'lat', rr.lat, 'lng', rr.lng, 'location_at', rr.location_at)
+                 'distance_m', d.m,
+                 -- A responder's position is shown only while the SOS is active and once they're close
+                 -- (or have arrived), so the person who sent it never learns where they set off from
+                 -- or where they go afterwards.
+                 'lat', case when a.status = 'active' and rr.status in ('en_route', 'arrived')
+                              and (rr.status = 'arrived' or d.m <= v_zone) then rr.lat end,
+                 'lng', case when a.status = 'active' and rr.status in ('en_route', 'arrived')
+                              and (rr.status = 'arrived' or d.m <= v_zone) then rr.lng end,
+                 'location_at', rr.location_at)
                order by rr.responded_at)
-          from public.alert_recipients rr join public.profiles p on p.id = rr.user_id
+          from public.alert_recipients rr
+          join public.profiles p on p.id = rr.user_id
+          cross join lateral (select case when rr.lat is null then rr.distance_m
+                                          else round(public._distance_m(a.lat, a.lng, rr.lat, rr.lng))::int end as m) d
          where rr.alert_id = a.id and rr.status in ('en_route', 'arrived', 'withdrawn')), '[]'::jsonb));
   end if;
 
@@ -654,12 +709,27 @@ begin
       'lng', case when v_active then a.lng end),
     'requester', jsonb_build_object(
       'name', coalesce(nullif(split_part(btrim(req.display_name), ' ', 1), ''), 'Someone'),
-      'allergies', case when v_active and req.share_medical_with_responders then req.allergies end),
+      'allergies', case when v_active and req.share_medical_with_responders then req.allergies end,
+      -- Trust signals shown before a responder decides to go
+      'phone_verified', public._phone_verified(a.requester_id),
+      'member_since', req.created_at,
+      'past_resolved', (select count(*) from public.alerts x
+                         where x.requester_id = a.requester_id and x.id <> a.id
+                           and not x.is_test and x.status = 'resolved')),
+    'safety', jsonb_build_object(
+      'checkin_due_at', case when r.safe_confirmed_at is null and r.felt_unsafe_at is null
+                               and r.status in ('en_route', 'arrived')
+                             then coalesce(r.last_checkin_at, r.responded_at)
+                                  + make_interval(mins => public._cfg('checkin_minutes')::int) end,
+      'safe_confirmed_at', r.safe_confirmed_at,
+      'felt_unsafe_at', r.felt_unsafe_at,
+      'escalated_at', r.escalated_at,
+      'needs_confirmation', r.status in ('en_route', 'arrived') and r.safe_confirmed_at is null
+                            and r.felt_unsafe_at is null),
     'en_route_count', (select count(*) from public.alert_recipients
                         where alert_id = a.id and status in ('en_route', 'arrived')),
     'max_en_route', public._cfg('max_en_route')::int);
 end $$;
-
 -- Home screen: my active SOS (if any) + alerts I've been asked to help with.
 create or replace function public.my_alerts() returns jsonb
 language plpgsql security definer set search_path = '' as $$
@@ -678,14 +748,26 @@ begin
              order by a.created_at desc)
         from public.alert_recipients r join public.alerts a on a.id = r.alert_id
        where r.user_id = v_uid and a.status = 'active'
-         and r.status in ('notified', 'en_route', 'arrived')), '[]'::jsonb));
+         and r.status in ('notified', 'en_route', 'arrived')), '[]'::jsonb),
+    -- Responses where I haven't confirmed I'm safe yet (even if the SOS has ended).
+    'safety_pending', coalesce((
+      select jsonb_agg(r.alert_id order by r.responded_at desc)
+        from public.alert_recipients r
+       where r.user_id = v_uid and r.status in ('en_route', 'arrived')
+         and r.safe_confirmed_at is null and r.felt_unsafe_at is null
+         and r.responded_at > now() - interval '24 hours'), '[]'::jsonb),
+    'me', jsonb_build_object(
+      'phone_verified', public._phone_verified(v_uid),
+      'phone_required', public._cfg('require_verified_phone') = 1,
+      'new_account_until', (select p.created_at + make_interval(hours => public._cfg('new_account_hours')::int)
+                              from public.profiles p where p.id = v_uid),
+      'suspended', public._am_i_suspended()));
 end $$;
-
 -- Responder: flag an SOS as fake / nobody there / abusive. Only people who were alerted can report.
 create or replace function public.report_alert(p_alert_id uuid, p_reason text, p_note text default null)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 begin
-  if p_reason not in ('fake', 'no_one_there', 'abusive', 'other') then raise exception 'Invalid reason'; end if;
+  if p_reason not in ('fake', 'no_one_there', 'abusive', 'unsafe', 'other') then raise exception 'Invalid reason'; end if;
   if not exists (select 1 from public.alert_recipients r
                   where r.alert_id = p_alert_id and r.user_id = auth.uid()) then
     return jsonb_build_object('ok', false, 'reason', 'not_invited');
@@ -696,6 +778,106 @@ begin
     set reason = excluded.reason, note = excluded.note, created_at = now();
   return jsonb_build_object('ok', true);
 end $$;
+
+-- Responder safety: "I'm safe, I've left" (p_still_there = false) or "I'm OK, still helping" (true).
+create or replace function public.confirm_responder_safe(p_alert_id uuid, p_still_there boolean default false)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+begin
+  update public.alert_recipients
+     set last_checkin_at   = now(),
+         safe_confirmed_at = case when p_still_there then safe_confirmed_at else coalesce(safe_confirmed_at, now()) end
+   where alert_id = p_alert_id and user_id = auth.uid()
+     and status in ('en_route', 'arrived', 'withdrawn');
+  if not found then return jsonb_build_object('ok', false, 'reason', 'not_responding'); end if;
+  return jsonb_build_object('ok', true);
+end $$;
+
+-- Responder safety: "I feel unsafe". Stops the response, reports the SOS (which puts the sender on hold)
+-- and contacts the responder's emergency contact right away. The app also opens the 911 dialer.
+create or replace function public.responder_unsafe(p_alert_id uuid) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+begin
+  update public.alert_recipients
+     set status = case when status in ('en_route', 'arrived') then 'withdrawn' else status end,
+         felt_unsafe_at = coalesce(felt_unsafe_at, now())
+   where alert_id = p_alert_id and user_id = auth.uid();
+  if not found then return jsonb_build_object('ok', false, 'reason', 'not_invited'); end if;
+  insert into public.alert_reports (alert_id, reporter_id, reason, note)
+  values (p_alert_id, auth.uid(), 'unsafe', 'Responder tapped "I feel unsafe"')
+  on conflict (alert_id, reporter_id) do update set reason = 'unsafe', created_at = now();
+  return jsonb_build_object('ok', true);
+end $$;
+
+-- Automatic hold: an "unsafe" or "abusive" report, or reports from several different responders,
+-- suspends the SOS sender until the team reviews it (see the "EpiRelay admin" notebook).
+create or replace function public._auto_hold_on_report() returns trigger
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_sender uuid;
+  v_reporters int;
+begin
+  select requester_id into v_sender from public.alerts where id = new.alert_id;
+  select count(distinct rp.reporter_id) into v_reporters
+    from public.alert_reports rp join public.alerts a on a.id = rp.alert_id
+   where a.requester_id = v_sender and rp.created_at > now() - interval '30 days';
+  if new.reason in ('unsafe', 'abusive') or v_reporters >= public._cfg('auto_hold_reporters') then
+    insert into public.suspended_users (user_id, reason)
+    values (v_sender, 'Automatic hold: ' || case when new.reason in ('unsafe', 'abusive')
+                                                 then 'a responder reported "' || new.reason || '"'
+                                                 else v_reporters || ' responders reported alerts' end
+                      || '. Review in the admin notebook, then remove the hold if it was a mistake.')
+    on conflict (user_id) do nothing;
+  end if;
+  return new;
+end $$;
+
+create trigger alert_reports_auto_hold
+  after insert or update on public.alert_reports
+  for each row execute function public._auto_hold_on_report();
+
+-- For the safety-escalation Edge Function (server only): claims responders whose check-in is overdue
+-- (or who tapped "I feel unsafe") and returns what's needed to text their emergency contact.
+create or replace function public._claim_due_safety_escalations() returns table (
+  alert_id uuid, user_id uuid, responder_name text, contact_name text, contact_phone text,
+  reason text, last_lat float8, last_lng float8, dest_lat float8, dest_lng float8)
+language plpgsql security definer set search_path = '' as $$
+#variable_conflict use_column
+begin
+  return query
+  with due as (
+    select r.alert_id, r.user_id,
+           case when r.felt_unsafe_at is not null then 'unsafe' else 'no_checkin' end as reason
+      from public.alert_recipients r
+     where r.escalated_at is null
+       and r.safe_confirmed_at is null
+       and r.responded_at > now() - interval '12 hours'
+       and (r.felt_unsafe_at is not null
+            or (r.status in ('en_route', 'arrived')
+                and coalesce(r.last_checkin_at, r.responded_at)
+                    < now() - make_interval(mins => (public._cfg('checkin_minutes')
+                                                     + public._cfg('checkin_grace_minutes'))::int)))
+     for update of r skip locked
+  ), marked as (
+    update public.alert_recipients r set escalated_at = now(), escalation_result = 'claimed'
+      from due where r.alert_id = due.alert_id and r.user_id = due.user_id
+    returning r.alert_id, r.user_id, r.lat, r.lng
+  )
+  select m.alert_id, m.user_id,
+         coalesce(nullif(btrim(p.display_name), ''), 'An EpiRelay responder'),
+         p.emergency_contact_name, p.emergency_contact_phone, d.reason,
+         coalesce(m.lat, l.lat), coalesce(m.lng, l.lng), a.lat, a.lng
+    from marked m
+    join due d on d.alert_id = m.alert_id and d.user_id = m.user_id
+    join public.profiles p on p.id = m.user_id
+    join public.alerts a on a.id = m.alert_id
+    left join public.responder_locations l on l.user_id = m.user_id;
+end $$;
+
+create or replace function public._record_escalation_result(p_alert_id uuid, p_user_id uuid, p_result text)
+returns void language sql security definer set search_path = '' as $$
+  update public.alert_recipients set escalation_result = left(p_result, 200)
+   where alert_id = p_alert_id and user_id = p_user_id
+$$;
 
 -- Health check used by the daily keep-awake job (stops the free server from pausing).
 create or replace function public.ping() returns timestamptz
@@ -737,6 +919,17 @@ end $$;
 --  internal helpers can't be called from the app at all.
 -- ---------------------------------------------------------------------
 revoke execute on function
+  public._phone_verified(uuid), public._is_new_account(uuid), public._auto_hold_on_report(),
+  public._claim_due_safety_escalations(), public._record_escalation_result(uuid, uuid, text)
+from public, anon, authenticated;
+-- Only the server-side safety function may claim escalations.
+do $$ begin
+  if exists (select 1 from pg_roles where rolname = 'service_role') then
+    execute 'grant execute on function public._claim_due_safety_escalations(), public._record_escalation_result(uuid, uuid, text) to service_role';
+  end if;
+end $$;
+
+revoke execute on function
   public._cfg(text), public._distance_m(float8, float8, float8, float8), public._fmt_distance(float8),
   public._handle_new_user(), public._touch_updated_at(), public._send_push(jsonb),
   public._eligible_responders(float8, float8, int, uuid), public._expire_stale_alerts(),
@@ -751,6 +944,7 @@ revoke execute on function
   public.respond_to_alert(uuid, boolean), public.update_responder_position(uuid, float8, float8),
   public.set_responder_status(uuid, text), public.close_alert(uuid, text),
   public.get_alert(uuid), public.my_alerts(), public.report_alert(uuid, text, text),
+  public.confirm_responder_safe(uuid, boolean), public.responder_unsafe(uuid),
   public.delete_my_account()
 from public, anon;
 
@@ -762,6 +956,7 @@ grant execute on function
   public.respond_to_alert(uuid, boolean), public.update_responder_position(uuid, float8, float8),
   public.set_responder_status(uuid, text), public.close_alert(uuid, text),
   public.get_alert(uuid), public.my_alerts(), public.report_alert(uuid, text, text),
+  public.confirm_responder_safe(uuid, boolean), public.responder_unsafe(uuid),
   public.delete_my_account()
 to authenticated;
 
@@ -779,3 +974,46 @@ begin
     alter publication supabase_realtime add table public.alerts, public.alert_recipients, public.messages;
   end if;
 end $$;
+
+
+-- ---------------------------------------------------------------------
+--  Safety check-in job: every minute, if any responder's check-in is overdue (or they tapped
+--  "I feel unsafe"), call the safety-escalation Edge Function, which texts their emergency contact.
+--  Needs: the Edge Function deployed (supabase/functions/safety-escalation) and the project URL in Vault:
+--    select vault.create_secret('https://YOUR-PROJECT.supabase.co', 'project_url');
+-- ---------------------------------------------------------------------
+-- CRON-BEGIN
+-- Every minute, if a responder missed a safety check-in or tapped "I feel unsafe", call the
+-- safety-escalation Edge Function, which texts their emergency contact. Needs two Vault secrets:
+-- 'project_url' (https://<project>.supabase.co) and 'safety_cron_secret' (random, created below).
+create extension if not exists pg_cron;
+select vault.create_secret(encode(extensions.gen_random_bytes(24), 'hex'), 'safety_cron_secret')
+ where not exists (select 1 from vault.secrets where name = 'safety_cron_secret');
+
+create or replace function public._safety_cron_secret()
+returns text language sql stable security definer set search_path = '' as $$
+  select decrypted_secret from vault.decrypted_secrets where name = 'safety_cron_secret'
+$$;
+revoke all on function public._safety_cron_secret() from public, anon, authenticated;
+grant execute on function public._safety_cron_secret() to service_role;
+
+select cron.schedule('safety-escalations', '* * * * *', $cron$
+  select net.http_post(
+    url     := (select decrypted_secret from vault.decrypted_secrets where name = 'project_url')
+               || '/functions/v1/safety-escalation',
+    body    := '{}'::jsonb,
+    headers := jsonb_build_object(
+                 'Content-Type', 'application/json',
+                 'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets
+                                    where name = 'safety_cron_secret')))
+  where exists (
+    select 1 from public.alert_recipients r
+     where r.escalated_at is null and r.safe_confirmed_at is null
+       and r.responded_at > now() - interval '12 hours'
+       and (r.felt_unsafe_at is not null
+            or (r.status in ('en_route', 'arrived')
+                and coalesce(r.last_checkin_at, r.responded_at)
+                    < now() - make_interval(mins => (public._cfg('checkin_minutes')
+                                                     + public._cfg('checkin_grace_minutes'))::int))))
+$cron$);
+-- CRON-END

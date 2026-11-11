@@ -78,7 +78,7 @@ export default function SosScreen() {
   const points: MapPoint[] = [
     { id: 'me', latitude: alert.lat, longitude: alert.lng, title: 'You', kind: 'patient' },
     ...coming
-      .filter((r) => r.lat !== null && r.lng !== null)
+      .filter((r) => active && r.lat !== null && r.lng !== null)
       .map((r) => ({
         id: r.user_id,
         latitude: r.lat!,
@@ -132,6 +132,13 @@ export default function SosScreen() {
             />
           </View>
         ))}
+
+        {active && coming.some((r) => r.status === 'en_route' && r.lat === null) && (
+          <T kind="small">
+            For their safety, responders appear on your map once they’re within about{' '}
+            {formatDistance(view.privacy_zone_m)}.
+          </T>
+        )}
 
         {canWiden && (
           <Button kind="secondary" title="Widen search (~5 miles)" onPress={widen} loading={busy === 'widen'} />

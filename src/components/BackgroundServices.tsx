@@ -17,7 +17,7 @@ import { alertNow, registerPushToken } from '@/lib/notifications';
  *  • keeps an available carrier's location fresh so they can be matched
  *    (in the background too, once "Allow all the time" is granted)
  *  • sounds an SOS the moment one arrives
- *  • opens the right screen when a notification is tapped
+ *  • opens the right screen when a notification is tapped (SOS, safety check-in, expiry reminder)
  */
 export function BackgroundServices() {
   const { session, profile } = useAuth();
@@ -85,10 +85,12 @@ export function BackgroundServices() {
   const lastResponse = Notifications.useLastNotificationResponse();
   useEffect(() => {
     if (!lastResponse) return;
-    const data = lastResponse.notification.request.content.data as { type?: string; alertId?: string } | undefined;
-    if (data?.alertId && data.type === 'sos') router.push(`/respond/${data.alertId}`);
+    const data = lastResponse.notification.request.content.data as
+      | { type?: string; kind?: string; alertId?: string }
+      | undefined;
+    if (data?.alertId && (data.type === 'sos' || data.kind === 'safety')) router.push(`/respond/${data.alertId}`);
     else if (data?.alertId && data.type === 'sos_update') router.push(`/sos/${data.alertId}`);
-    else if ((data as { kind?: string } | undefined)?.kind === 'expiry') router.push('/profile');
+    else if (data?.kind === 'expiry') router.push('/profile');
     Notifications.clearLastNotificationResponseAsync();
   }, [lastResponse]);
 

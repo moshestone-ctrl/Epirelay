@@ -24,8 +24,9 @@ const north = (m) => ({ lat: base.lat + m / 111320, lng: base.lng });
   const db = new PGlite();
   await db.exec(`
     create schema auth; create schema extensions; create schema net;
-    create role anon nologin; create role authenticated nologin;
-    create table auth.users (id uuid primary key, raw_user_meta_data jsonb default '{}');
+    create role anon nologin; create role authenticated nologin; create role service_role nologin;
+    create table auth.users (id uuid primary key, raw_user_meta_data jsonb default '{}',
+                             phone text, phone_confirmed_at timestamptz);
     create function auth.uid() returns uuid language sql stable as
       $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
     create table net.calls (id serial, url text, body jsonb);
@@ -40,7 +41,8 @@ const north = (m) => ({ lat: base.lat + m / 111320, lng: base.lng });
   `);
 
   const sql = fs.readFileSync(schemaPath, 'utf8')
-    .replace(/create extension if not exists pg_net[^;]*;/, '');
+    .replace(/create extension if not exists pg_net[^;]*;/, '')
+    .replace(/-- CRON-BEGIN[\s\S]*-- CRON-END/, '');   // pg_cron + Vault aren't available here
   await db.exec(sql);
   console.log('schema loaded');
 
@@ -55,6 +57,8 @@ const north = (m) => ({ lat: base.lat + m / 111320, lng: base.lng });
   for (const [k, id] of Object.entries(U))
     await db.query(`insert into auth.users (id, raw_user_meta_data) values ($1, $2)`, [id, { display_name: k === 'B' ? 'Bea Lopez' : 'User ' + k }]);
   ok((await db.query('select count(*)::int c from public.profiles')).rows[0].c === 8, 'profile auto-created for each sign-up');
+  // These test accounts are "established" (older than the 24-hour new-account window).
+  await db.exec(`update public.profiles set created_at = now() - interval '3 days'`);
 
   // Carriers set up their profiles + location
   const carrier = async (who, dist, extra = '') => {
@@ -107,7 +111,11 @@ const north = (m) => ({ lat: base.lat + m / 111320, lng: base.lng });
   ok(pushes.length === 2 && pushes[1].body[0].to === 'ExponentPushToken[aaa]', 'requester gets "help is on the way" push');
   console.log('    push:', pushes[1].body[0].body);
   const aView = (await rpc('A', 'select public.get_alert($1) r', [alertId])).r;
-  ok(aView.role === 'requester' && aView.responders.length === 1 && aView.responders[0].name === 'Bea Lopez', 'requester sees B coming');
+  ok(aView.role === 'requester' && aView.responders.length === 1 && aView.responders[0].name === 'Bea', 'requester sees B coming, first name only');
+  ok(aView.responders[0].lat === null, 'requester does NOT see where B is while B is far away (privacy zone)');
+  ok(bView2.requester.phone_verified === false && bView2.requester.member_since && bView2.requester.past_resolved === 0,
+     'responder sees trust info about the sender (phone verified, member since, past SOS)');
+  ok(bView2.safety.needs_confirmation === true && bView2.safety.checkin_due_at, 'accepting starts safety check-ins');
   ok((await as('A', 'select * from public.alert_recipients')).rows.length === 1, 'requester can read the en-route responder row (for live updates)');
   ok((await as('B', 'select * from public.alerts')).rows.length === 1, 'en-route responder can read the alert (for live updates)');
 
@@ -133,12 +141,15 @@ const north = (m) => ({ lat: base.lat + m / 111320, lng: base.lng });
   const aView2 = (await rpc('A', 'select public.get_alert($1) r', [alertId])).r;
   const bRow = aView2.responders.find(r => r.user_id === U.B);
   ok(bRow.distance_m >= 95 && bRow.distance_m <= 105, `requester sees B's live distance (${bRow.distance_m} m)`);
+  ok(bRow.lat !== null, 'once B is within the privacy zone, the requester sees B on the map');
 
   ok((await rpc('I', `select public.set_responder_status($1, 'withdrawn') r`, [alertId])).r.ok, 'I withdraws');
   ok(!!(await fails('C', `select public.close_alert($1, 'resolved')`, [alertId])), 'responder who has not arrived cannot close');
   ok((await rpc('B', `select public.set_responder_status($1, 'arrived') r`, [alertId])).r.ok, 'B arrives');
   ok((await rpc('B', `select public.close_alert($1, 'resolved') r`, [alertId])).r.ok, 'arrived responder can mark resolved');
   ok((await db.query('select status from public.alerts where id = $1', [alertId])).rows[0].status === 'resolved', 'alert is resolved');
+  const aView3 = (await rpc('A', 'select public.get_alert($1) r', [alertId])).r;
+  ok(aView3.responders.every(r => r.lat === null && r.lng === null), 'after the SOS ends, the requester no longer sees any responder on the map');
   ok(!!(await fails('B', `insert into public.messages (alert_id, body) values ($1, 'late')`, [alertId])), 'no messages after close');
 
   ok(!(await fails('A', `insert into public.feedback (alert_id, rating, comment) values ($1, 5, 'Thank you')`, [alertId])), 'requester leaves feedback');
@@ -198,6 +209,91 @@ const north = (m) => ({ lat: base.lat + m / 111320, lng: base.lng });
 
   // Keep-awake health check
   ok((await as(null, 'select public.ping() t')).rows.length === 1, 'logged-out health check (ping) works');
+
+  console.log('\nResponder safety');
+  // Fresh cast so earlier suspensions don't interfere.
+  const S = { R: '00000000-0000-0000-0000-0000000000a1', X: '00000000-0000-0000-0000-0000000000a2',
+              Y: '00000000-0000-0000-0000-0000000000a3', N: '00000000-0000-0000-0000-0000000000a4',
+              Z: '00000000-0000-0000-0000-0000000000a5' };
+  Object.assign(U, S);
+  for (const [k, id] of Object.entries(S))
+    await db.query(`insert into auth.users (id, raw_user_meta_data) values ($1, $2)`, [id, { display_name: 'User ' + k }]);
+  await db.query(`update public.profiles set created_at = now() - interval '3 days' where id = any($1::uuid[])`,
+                 [[S.R, S.X, S.Y, S.Z]]);   // N stays a brand-new account
+  // Far from everyone else (somewhere in PA)
+  const far = { lat: 40.2, lng: -76.9 };
+  const near = (m) => ({ lat: far.lat + m / 111320, lng: far.lng });
+  for (const [who, d] of [['X', 300], ['Y', 700]]) {
+    await as(who, `update public.profiles set carries_epinephrine = true, available_to_respond = true, device_type = 'auto_injector',
+                   device_expires_on = current_date + 200, emergency_contact_name = 'Mom', emergency_contact_phone = '555 123 4567' where id = auth.uid()`);
+    const p = near(d); await as(who, 'select public.update_my_location($1,$2)', [p.lat, p.lng]);
+  }
+
+  // New account: practice only
+  const newReal = await fails('N', 'select public.create_alert($1,$2)', [far.lat, far.lng]);
+  ok(newReal && newReal.includes('New accounts'), 'a brand-new account cannot send a real SOS');
+  const newTest = (await rpc('N', 'select public.create_alert($1,$2,null,true) r', [far.lat, far.lng])).r;
+  ok(newTest.alert_id && newTest.notified === 2, 'a brand-new account can send a practice alert');
+  await as('N', `select public.close_alert($1, 'cancelled')`, [newTest.alert_id]);
+  const nHome = (await rpc('N', 'select public.my_alerts() r')).r;
+  ok(nHome.me.new_account_until && nHome.me.phone_verified === false && nHome.me.phone_required === false,
+     'home screen gets my verification + new-account status');
+
+  // Check-ins and escalation
+  const sa = (await rpc('R', 'select public.create_alert($1,$2) r', [far.lat, far.lng])).r;
+  await as('X', 'select public.respond_to_alert($1, true)', [sa.alert_id]);
+  await as('Y', 'select public.respond_to_alert($1, true)', [sa.alert_id]);
+  let claimed = (await db.query('select * from public._claim_due_safety_escalations()')).rows;
+  ok(claimed.length === 0, 'nobody is escalated while check-ins are current');
+  await db.query(`update public.alert_recipients set last_checkin_at = now() - interval '31 minutes' where alert_id = $1`, [sa.alert_id]);
+  ok((await rpc('X', 'select public.confirm_responder_safe($1, true) r', [sa.alert_id])).r.ok, '"I\'m OK, still here" resets the check-in timer');
+  const xHome = (await rpc('X', 'select public.my_alerts() r')).r;
+  ok(xHome.safety_pending.includes(sa.alert_id), 'home screen lists responses still waiting for "I\'m safe"');
+  claimed = (await db.query('select * from public._claim_due_safety_escalations()')).rows;
+  ok(claimed.length === 1 && claimed[0].user_id === S.Y && claimed[0].reason === 'no_checkin' && claimed[0].contact_phone === '555 123 4567',
+     'a responder who misses a check-in is escalated to their emergency contact (once)');
+  ok((await db.query('select * from public._claim_due_safety_escalations()')).rows.length === 0, 'escalations are claimed only once');
+  ok(!!(await fails('X', 'select * from public._claim_due_safety_escalations()')), 'the app cannot trigger or read escalations');
+  // Requester closing the SOS doesn't stop the responder's check-in
+  await as('R', `select public.close_alert($1, 'resolved')`, [sa.alert_id]);
+  ok((await rpc('X', 'select public.my_alerts() r')).r.safety_pending.includes(sa.alert_id),
+     'check-ins continue even if the sender closes the SOS');
+  ok((await rpc('X', 'select public.confirm_responder_safe($1) r', [sa.alert_id])).r.ok &&
+     !(await rpc('X', 'select public.my_alerts() r')).r.safety_pending.includes(sa.alert_id), '"I\'m safe" ends check-ins');
+
+  // "I feel unsafe"
+  const sb = (await rpc('R', 'select public.create_alert($1,$2) r', [far.lat, far.lng])).r;
+  await as('X', 'select public.respond_to_alert($1, true)', [sb.alert_id]);
+  ok((await rpc('X', 'select public.responder_unsafe($1) r', [sb.alert_id])).r.ok, 'responder can tap "I feel unsafe"');
+  const xr = (await db.query('select status, felt_unsafe_at from public.alert_recipients where alert_id=$1 and user_id=$2', [sb.alert_id, S.X])).rows[0];
+  ok(xr.status === 'withdrawn' && xr.felt_unsafe_at, '"I feel unsafe" withdraws the responder');
+  claimed = (await db.query('select * from public._claim_due_safety_escalations()')).rows;
+  ok(claimed.length === 1 && claimed[0].reason === 'unsafe', '"I feel unsafe" contacts their emergency contact immediately');
+  ok((await db.query('select count(*)::int c from public.suspended_users where user_id = $1', [S.R])).rows[0].c === 1,
+     '"I feel unsafe" puts the SOS sender on hold automatically');
+  const held = await fails('R', 'select public.create_alert($1,$2)', [far.lat, far.lng]);
+  ok(held && held.includes('suspended'), 'a sender on hold cannot send another SOS');
+
+  // Auto-hold after reports from 2 different responders
+  const zc = (await rpc('Z', 'select public.create_alert($1,$2,null,true) r', [far.lat, far.lng])).r;
+  await as('X', `select public.report_alert($1, 'fake')`, [zc.alert_id]);
+  ok((await db.query('select count(*)::int c from public.suspended_users where user_id = $1', [S.Z])).rows[0].c === 0, 'one "fake" report alone does not hold the sender');
+  await as('Y', `select public.report_alert($1, 'no_one_there')`, [zc.alert_id]);
+  ok((await db.query('select count(*)::int c from public.suspended_users where user_id = $1', [S.Z])).rows[0].c === 1, 'reports from 2 different responders put the sender on hold');
+
+  console.log('\nPhone verification (when switched on)');
+  await db.exec(sql.match(/create or replace function public\._cfg[\s\S]*?\$\$;/)[0].replace("when 'require_verified_phone'   then 0", "when 'require_verified_phone'   then 1"));
+  ok((await rpc('Y', 'select public.nearby_responder_count($1,$2) n', [far.lat, far.lng])).n === 0, 'unverified carriers are not matched');
+  await db.query(`update auth.users set phone = '15551234567', phone_confirmed_at = now() where id = $1`, [S.X]);
+  ok((await rpc('Y', 'select public.nearby_responder_count($1,$2) n', [far.lat, far.lng])).n === 1, 'verified carriers are matched');
+  const unv = await fails('Y', 'select public.create_alert($1,$2)', [far.lat, far.lng]);
+  ok(unv && unv.includes('Verify your phone'), 'an unverified person cannot send an SOS');
+  await db.query(`update auth.users set phone = '15559876543', phone_confirmed_at = now() where id = $1`, [S.Y]);
+  const ver = (await rpc('Y', 'select public.create_alert($1,$2,null,true) r', [far.lat, far.lng])).r;
+  ok(ver.alert_id && ver.notified === 1, 'a verified person can send an SOS');
+  const xv = (await rpc('X', 'select public.get_alert($1) r', [ver.alert_id])).r;
+  ok(xv.requester.phone_verified === true, 'responders see the sender is phone-verified');
+  await db.exec(sql.match(/create or replace function public\._cfg[\s\S]*?\$\$;/)[0]);  // back to default
 
   console.log('\nPermissions');
   ok(!!(await fails(null, 'select public.create_alert(1,1)')), 'logged-out callers cannot create alerts');

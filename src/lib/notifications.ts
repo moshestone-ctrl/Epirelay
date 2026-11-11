@@ -110,3 +110,38 @@ export async function scheduleExpiryReminders(expiresOn: string | null) {
     });
   }
 }
+
+/**
+ * Responder safety check-in: a loud reminder on this phone when the next check-in is due, and a second
+ * one 5 minutes later. If nobody answers in the app, the server texts the responder's emergency contact.
+ */
+export async function scheduleSafetyCheckin(alertId: string, dueAt: string) {
+  await cancelSafetyCheckin(alertId);
+  const due = new Date(dueAt).getTime();
+  if (!Number.isFinite(due) || !(await ensureNotificationPermission())) return;
+  const reminders = [
+    { at: due, body: 'Tap to tell us you’re OK. If we don’t hear from you, we’ll text your emergency contact.' },
+    { at: due + 5 * 60_000, body: 'Please check in now — otherwise we’ll text your emergency contact in a few minutes.' },
+  ];
+  for (const r of reminders) {
+    const when = new Date(Math.max(r.at, Date.now() + 5_000));
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'EpiRelay safety check',
+        body: r.body,
+        data: { kind: 'safety', alertId },
+        sound: 'default',
+      },
+      trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when, channelId: SOS_CHANNEL },
+    });
+  }
+}
+
+export async function cancelSafetyCheckin(alertId?: string) {
+  const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+  await Promise.all(
+    scheduled
+      .filter((n) => n.content.data?.kind === 'safety' && (!alertId || n.content.data?.alertId === alertId))
+      .map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier)),
+  );
+}

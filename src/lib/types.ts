@@ -47,6 +47,8 @@ export type RequesterAlertView = {
     created_at: string;
     closed_at: string | null;
   };
+  /** Responders show on your map only once they're this close (metres), to protect where they live. */
+  privacy_zone_m: number;
   responders: ResponderSummary[];
 };
 
@@ -64,9 +66,27 @@ export type ResponderAlertView = {
     lat: number | null; // only once you're on the way
     lng: number | null;
   };
-  requester: { name: string; allergies: string | null };
+  requester: {
+    name: string;
+    allergies: string | null;
+    phone_verified: boolean;
+    member_since: string;
+    /** Earlier real SOS alerts from this person that ended with help arriving. */
+    past_resolved: number;
+  };
+  safety: ResponderSafety;
   en_route_count: number;
   max_en_route: number;
+};
+
+export type ResponderSafety = {
+  /** When the next "are you OK?" check-in is due (null once you've confirmed you're safe). */
+  checkin_due_at: string | null;
+  safe_confirmed_at: string | null;
+  felt_unsafe_at: string | null;
+  /** When your emergency contact was texted (missed check-in or "I feel unsafe"). */
+  escalated_at: string | null;
+  needs_confirmation: boolean;
 };
 
 export type AlertView = RequesterAlertView | ResponderAlertView;
@@ -82,6 +102,16 @@ export type Invitation = {
 export type MyAlerts = {
   my_active_alert_id: string | null;
   invitations: Invitation[];
+  /** Alerts I went to help with where I haven't said "I'm safe" yet. */
+  safety_pending: string[];
+  me: {
+    phone_verified: boolean;
+    /** True once phone verification is switched on for everyone. */
+    phone_required: boolean;
+    /** New accounts can send practice alerts only until this time. */
+    new_account_until: string | null;
+    suspended: boolean;
+  };
 };
 
 export type Message = {

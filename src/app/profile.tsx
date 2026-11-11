@@ -19,10 +19,10 @@ const DEVICE_OPTIONS: { value: DeviceType; label: string }[] = [
 
 export default function ProfileScreen() {
   const t = useTheme();
-  const { profile, updateProfile } = useAuth();
+  const { session, profile, updateProfile } = useAuth();
+  const phoneVerified = Boolean(session?.user.phone_confirmed_at);
   const [form, setForm] = useState(() => ({
     display_name: profile?.display_name ?? '',
-    phone: profile?.phone ?? '',
     carries_epinephrine: profile?.carries_epinephrine ?? false,
     device_type: profile?.device_type ?? null,
     device_expires_on: profile?.device_expires_on ?? '',
@@ -42,13 +42,18 @@ export default function ProfileScreen() {
       if (!isValidDate(expires)) {
         return Alert.alert('Check the date', 'Enter the expiration date printed on your device as YYYY-MM-DD, e.g. 2027-08-31.');
       }
+      if (form.available_to_respond && (!form.emergency_contact_name.trim() || !form.emergency_contact_phone.trim())) {
+        return Alert.alert(
+          'Add an emergency contact',
+          'Responders need one. If you go to help someone and don’t answer a safety check-in, we text this person where you are.',
+        );
+      }
     }
     setBusy(true);
     try {
       const carries = form.carries_epinephrine;
       await updateProfile({
         display_name: form.display_name.trim(),
-        phone: form.phone.trim() || null,
         carries_epinephrine: carries,
         device_type: carries ? form.device_type : null,
         device_expires_on: carries ? expires : null,
@@ -95,14 +100,20 @@ export default function ProfileScreen() {
       <Card>
         <T kind="label">About you</T>
         <Field label="First name" value={form.display_name} onChangeText={(v) => set('display_name', v)} maxLength={60} />
-        <Field
-          label="Phone (optional)"
-          value={form.phone}
-          onChangeText={(v) => set('phone', v)}
-          keyboardType="phone-pad"
-          maxLength={30}
-          hint="Not shown to anyone yet — kept for future call-back features."
-        />
+        <View style={{ gap: space.xs }}>
+          <T kind="label">Phone</T>
+          <T>
+            {phoneVerified && session?.user.phone
+              ? `+${session.user.phone.replace(/^\+/, '')} · verified ✓`
+              : 'Not verified yet'}
+          </T>
+          <T kind="small">Never shown to other people. Responders only see whether it’s verified.</T>
+          <Button
+            kind="secondary"
+            title={phoneVerified ? 'Change phone number' : 'Verify phone number'}
+            onPress={() => router.push('/verify-phone')}
+          />
+        </View>
       </Card>
 
       <Card>
@@ -145,24 +156,33 @@ export default function ProfileScreen() {
           maxLength={500}
           placeholder="e.g. Peanuts, bee stings"
         />
-        <Field
-          label="Emergency contact name"
-          value={form.emergency_contact_name}
-          onChangeText={(v) => set('emergency_contact_name', v)}
-          maxLength={60}
-        />
-        <Field
-          label="Emergency contact phone"
-          value={form.emergency_contact_phone}
-          onChangeText={(v) => set('emergency_contact_phone', v)}
-          keyboardType="phone-pad"
-          maxLength={30}
-        />
         <ToggleRow
           label="Share allergies with responders"
           hint="Only with people who are on their way to you, only during an SOS."
           value={form.share_medical_with_responders}
           onValueChange={(v) => set('share_medical_with_responders', v)}
+        />
+      </Card>
+
+      <Card>
+        <T kind="label">Emergency contact</T>
+        <T kind="small">
+          Someone we can text if you go to help and don’t answer a safety check-in, or tap “I feel unsafe”.
+          {form.carries_epinephrine ? ' Required for responders.' : ''}
+        </T>
+        <Field
+          label="Name"
+          value={form.emergency_contact_name}
+          onChangeText={(v) => set('emergency_contact_name', v)}
+          maxLength={60}
+        />
+        <Field
+          label="Mobile number"
+          value={form.emergency_contact_phone}
+          onChangeText={(v) => set('emergency_contact_phone', v)}
+          keyboardType="phone-pad"
+          maxLength={30}
+          placeholder="(555) 123-4567"
         />
       </Card>
 

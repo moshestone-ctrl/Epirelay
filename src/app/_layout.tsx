@@ -75,6 +75,7 @@ function RootStack() {
           <Stack.Screen name="sos/[id]" options={{ title: 'SOS', gestureEnabled: false }} />
           <Stack.Screen name="respond/[id]" options={{ title: 'Someone needs help' }} />
           <Stack.Screen name="feedback/[id]" options={{ title: 'How did it go?' }} />
+          <Stack.Screen name="verify-phone" options={{ title: 'Verify your phone' }} />
         </Stack.Protected>
         <Stack.Screen name="safety" options={{ title: 'Safety & legal' }} />
         <Stack.Screen name="reset-password" options={{ title: 'Set a new password' }} />

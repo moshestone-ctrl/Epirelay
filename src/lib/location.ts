@@ -71,3 +71,17 @@ export function timeAgo(iso: string): string {
   if (m < 60) return `${m} min ago`;
   return `${Math.round(m / 60)} h ago`;
 }
+
+/** "Joined today", "Joined 12 days ago", "Joined Mar 2026". */
+export function joinedText(iso: string): string {
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+  if (days < 1) return 'Joined today';
+  if (days < 2) return 'Joined yesterday';
+  if (days < 60) return `Joined ${days} days ago`;
+  return `Joined ${new Date(iso).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })}`;
+}
+
+/** Clock time, e.g. "3:45 PM". */
+export function clockTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}

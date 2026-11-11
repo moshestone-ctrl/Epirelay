@@ -9,7 +9,8 @@ import { useAuth } from '@/lib/auth';
 import { isBackgroundLocationRunning, startBackgroundLocation } from '@/lib/backgroundLocation';
 import { EMERGENCY_NUMBER } from '@/lib/config';
 import { useInterval, useRealtime } from '@/lib/hooks';
-import { callEmergency, ensureLocationPermission, formatDistance, getCurrentCoords, timeAgo } from '@/lib/location';
+import { callEmergency, clockTime, ensureLocationPermission, formatDistance, getCurrentCoords, timeAgo } from '@/lib/location';
+import { cancelSafetyCheckin } from '@/lib/notifications';
 import { space, useTheme } from '@/lib/theme';
 import type { MyAlerts } from '@/lib/types';
 
@@ -21,9 +22,18 @@ export default function Home() {
   const [mine, setMine] = useState<MyAlerts | null>(null);
   const [nearby, setNearby] = useState<number | null>(null);
   const [bgOn, setBgOn] = useState<boolean | null>(null);
+  const [checkedAt, setCheckedAt] = useState(() => Date.now());
+  const applyMine = useCallback((m: MyAlerts) => {
+    setMine(m);
+    setCheckedAt(Date.now());
+  }, []);
+
+  const me = mine?.me;
+  const newAccountUntil = me?.new_account_until ? new Date(me.new_account_until) : null;
+  const newAccount = Boolean(newAccountUntil && newAccountUntil.getTime() > checkedAt);
 
   const refresh = useCallback(async () => {
-    api.myAlerts().then(setMine).catch(() => {});
+    api.myAlerts().then(applyMine).catch(() => {});
     isBackgroundLocationRunning().then(setBgOn);
     try {
       if (await ensureLocationPermission()) {
@@ -33,18 +43,18 @@ export default function Home() {
     } catch {
       setNearby(null);
     }
-  }, []);
+  }, [applyMine]);
 
   useFocusEffect(
     useCallback(() => {
       refresh();
     }, [refresh]),
   );
-  useInterval(() => api.myAlerts().then(setMine).catch(() => {}), 30_000);
+  useInterval(() => api.myAlerts().then(applyMine).catch(() => {}), 30_000);
   useRealtime(
     'home-invitations',
     [{ table: 'alert_recipients', filter: `user_id=eq.${session?.user.id}` }],
-    () => api.myAlerts().then(setMine).catch(() => {}),
+    () => api.myAlerts().then(applyMine).catch(() => {}),
     Boolean(session),
   );
 
@@ -60,7 +70,7 @@ export default function Home() {
         return;
       }
       const c = await getCurrentCoords();
-      const res = await api.createAlert(c.latitude, c.longitude, practice);
+      const res = await api.createAlert(c.latitude, c.longitude, practice || newAccount);
       router.push(`/sos/${res.alert_id}`);
     } catch (e) {
       Alert.alert('Could not send alert', `${errorMessage(e)}\n\nCall ${EMERGENCY_NUMBER} now.`, [
@@ -102,6 +112,17 @@ export default function Home() {
     );
 
   const setAvailable = async (v: boolean) => {
+    if (v && !profile?.emergency_contact_phone) {
+      Alert.alert(
+        'Add an emergency contact first',
+        'If you go to help someone and don’t answer a safety check-in, we text this person where you are.',
+        [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'Add contact', onPress: () => router.push('/profile') },
+        ],
+      );
+      return;
+    }
     try {
       await updateProfile({ available_to_respond: v });
       if (v && !(await isBackgroundLocationRunning())) askBackground();
@@ -111,11 +132,43 @@ export default function Home() {
     }
   };
 
+  const confirmSafe = async (alertId: string) => {
+    try {
+      await api.confirmResponderSafe(alertId, false);
+      cancelSafetyCheckin(alertId).catch(() => {});
+      api.myAlerts().then(applyMine).catch(() => {});
+    } catch (e) {
+      Alert.alert('Could not update', errorMessage(e));
+    }
+  };
+
   const expiry = expiryStatus(profile?.device_expires_on ?? null);
   const invitations = mine?.invitations ?? [];
+  // "Are you safe?" for responses that have ended (live ones are handled on the respond screen).
+  const respondingIds = new Set(invitations.filter((i) => i.my_status !== 'notified').map((i) => i.alert_id));
+  const safetyPending = (mine?.safety_pending ?? []).filter((alertId) => !respondingIds.has(alertId));
 
   return (
     <Screen>
+      {me?.suspended && (
+        <Card tone="danger">
+          <T kind="heading">Your account is on hold</T>
+          <T>
+            After a report, your account can’t send or respond to alerts while the EpiRelay team reviews it. In an
+            emergency, call {EMERGENCY_NUMBER}.
+          </T>
+        </Card>
+      )}
+
+      {safetyPending.map((alertId) => (
+        <Card key={`safe-${alertId}`} tone="warn">
+          <T kind="heading">Are you safe?</T>
+          <T>You went to help someone. Let us know you’ve left safely, or we’ll check in with your emergency contact.</T>
+          <Button title="I’m safe" onPress={() => confirmSafe(alertId)} />
+          <Button kind="secondary" title="Open" onPress={() => router.push(`/respond/${alertId}`)} />
+        </Card>
+      ))}
+
       {mine?.my_active_alert_id && (
         <Card tone="danger">
           <T kind="heading">Your SOS is active</T>
@@ -154,11 +207,30 @@ export default function Home() {
       <Card>
         <ToggleRow
           label="Practice mode"
-          hint="Sends a clearly labelled TEST alert. Use it to try the app with friends — never to test strangers."
-          value={practice}
+          hint={
+            newAccount && newAccountUntil
+              ? `New accounts can send practice alerts only, until ${clockTime(newAccountUntil.toISOString())} ` +
+                `${newAccountUntil.toDateString() === new Date().toDateString() ? 'today' : 'tomorrow'}. ` +
+                'This stops fake alerts from brand-new accounts.'
+              : 'Sends a clearly labelled TEST alert. Use it to try the app with friends — never to test strangers.'
+          }
+          value={practice || newAccount}
           onValueChange={setPractice}
+          disabled={newAccount}
         />
       </Card>
+
+      {me && !me.phone_verified && (
+        <Card tone={me.phone_required ? 'warn' : undefined}>
+          <T kind="heading">Verify your phone number</T>
+          <T kind="muted">
+            {me.phone_required
+              ? 'Required before you can send an SOS or respond to one.'
+              : 'Responders see that your number is verified, which helps them trust your SOS.'}
+          </T>
+          <Button kind="secondary" title="Verify phone" onPress={() => router.push('/verify-phone')} />
+        </Card>
+      )}
 
       {profile?.carries_epinephrine ? (
         <Card tone={expiry.tone === 'danger' ? 'danger' : undefined}>

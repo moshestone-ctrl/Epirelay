@@ -3,7 +3,7 @@
 export const APP_NAME = 'EpiRelay';
 
 // Bump this when the onboarding acknowledgements or Terms change, to make everyone re-accept.
-export const TERMS_VERSION = 1;
+export const TERMS_VERSION = 2;
 
 export const EMERGENCY_NUMBER = '911';
 
@@ -21,6 +21,9 @@ export const RESPONDER_POSITION_MS = 10_000;
 
 // Show "Widen search" if nobody is on the way after this long.
 export const WIDEN_PROMPT_AFTER_MS = 45_000;
+
+// A responder on the way is asked "are you OK?" this often (must match checkin_minutes in schema.sql).
+export const CHECKIN_MINUTES = 20;
 
 // Distances: false = feet/miles (US), true = metres/kilometres.
 export const USE_METRIC = false;

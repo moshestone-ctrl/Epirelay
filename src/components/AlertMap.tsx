@@ -60,7 +60,7 @@ function boundsOf(points: MapPoint[], area?: { lat: number; lng: number; radiusM
 
 /**
  * Live map for an SOS: the person in need (red), responders on their way (blue) with their
- * distance, dashed lines between them, and optionally the search area.
+ * distance, lines between them, and optionally the search area.
  * The view zooms to fit everyone and follows as responders move.
  */
 export function AlertMap({
@@ -140,7 +140,7 @@ export function AlertMap({
             <Layer
               id="sos-area-line"
               type="line"
-              paint={{ 'line-color': t.danger, 'line-opacity': 0.55, 'line-width': 1.5, 'line-dasharray': [2, 2] }}
+              paint={{ 'line-color': t.danger, 'line-opacity': 0.5, 'line-width': 1.5 }}
             />
           </GeoJSONSource>
         )}
@@ -151,7 +151,7 @@ export function AlertMap({
               id="routes-line"
               type="line"
               layout={{ 'line-cap': 'round' }}
-              paint={{ 'line-color': t.accent, 'line-width': 2.5, 'line-opacity': 0.8, 'line-dasharray': [1, 2] }}
+              paint={{ 'line-color': t.accent, 'line-width': 3, 'line-opacity': 0.55 }}
             />
           </GeoJSONSource>
         )}
