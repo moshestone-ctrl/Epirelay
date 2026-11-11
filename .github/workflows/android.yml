@@ -69,7 +69,7 @@ jobs:
         id: cfg
         run: |
           if grep -q "YOUR-PROJECT" .env; then
-            echo "::warning::.env still has placeholder values, so this build is not published as a Release (it would open on a 'not connected to a server' screen)."
+            echo "::warning::.env still has placeholder values, so this build is published as a preview that opens on a 'not connected to a server' screen."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
@@ -100,11 +100,16 @@ jobs:
           retention-days: 30
 
       - name: Publish as a GitHub Release
-        if: steps.cfg.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          CONFIGURED: ${{ steps.cfg.outputs.configured }}
         run: |
-          gh release create "build-${{ github.run_number }}" out/*.apk \
-            --title "EpiRelay test build ${{ github.run_number }}" \
-            --notes "Android test build from commit ${GITHUB_SHA::7}. On your Android phone: open this page, tap the .apk file under Assets, then Open → Install. If asked, allow installing apps from your browser." \
-            --latest
+          if [ "$CONFIGURED" = "true" ]; then
+            TITLE="EpiRelay test build ${{ github.run_number }}"
+            WARN=""
+          else
+            TITLE="EpiRelay preview build ${{ github.run_number }} (not connected to a server yet)"
+            WARN="⚠️ This preview isn't connected to a server, so it opens on a 'not connected' screen. Use it to check the app installs; a later build will connect it."$'\n\n'
+          fi
+          NOTES="${WARN}Android build from commit ${GITHUB_SHA::7}."$'\n\n'"**To install:** on your Android phone, tap the .apk file under Assets, then Open → Install. If asked, allow installing apps from your browser. If Play Protect warns about an unknown developer, tap More details → Install anyway."
+          gh release create "build-${{ github.run_number }}" out/*.apk --title "$TITLE" --notes "$NOTES" --latest
