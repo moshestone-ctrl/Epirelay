@@ -1,0 +1,11 @@
+{
+  "name": "epirelay-schema-tests",
+  "private": true,
+  "description": "Runs supabase/schema.sql against embedded Postgres with Supabase-like stubs and checks matching, privacy and permissions.",
+  "scripts": {
+    "test": "node schema.test.js"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16"
+  }
+}

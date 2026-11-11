@@ -1,0 +1,105 @@
+# Builds the Android app (APK) on GitHub's servers every time code is pushed to `main`,
+# and publishes it as a GitHub Release you can download and install on your phone.
+#
+# Run it by hand: GitHub → your repo → Actions → "Build Android app" → Run workflow.
+#
+# Optional repository secrets (Settings → Secrets and variables → Actions):
+#   GOOGLE_MAPS_ANDROID_API_KEY   turns on the in-app map (see README)
+
+name: Build Android app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # needed to publish the Release
+
+jobs:
+  checks:
+    name: Type-check, lint and backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Type-check
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npx eslint .
+      - name: Backend tests (schema.sql against embedded Postgres)
+        working-directory: supabase/test
+        run: npm install --no-audit --no-fund && npm test
+
+  build:
+    name: Build APK
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      APP_VERSION_CODE: ${{ github.run_number }}
+      GOOGLE_MAPS_ANDROID_API_KEY: ${{ secrets.GOOGLE_MAPS_ANDROID_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - run: npm ci
+
+      - name: Check the backend is configured
+        run: |
+          if grep -q "YOUR-PROJECT" .env; then
+            echo "::warning::.env still has placeholder values — the app will open on a 'not connected to a server' screen."
+          fi
+
+      - name: Generate native Android project
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Give Gradle enough memory
+        run: |
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' android/gradle.properties
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+
+      - name: Name the APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/release/app-release.apk "out/EpiRelay-build-${{ github.run_number }}.apk"
+          ls -la out
+
+      - name: Keep a copy on the workflow run
+        uses: actions/upload-artifact@v7
+        with:
+          name: EpiRelay-build-${{ github.run_number }}
+          path: out/*.apk
+          retention-days: 30
+
+      - name: Publish as a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" out/*.apk \
+            --title "EpiRelay test build ${{ github.run_number }}" \
+            --notes "Android test build from commit ${GITHUB_SHA::7}. On your Android phone: open this page, tap the .apk file under Assets, then Open → Install. If asked, allow installing apps from your browser." \
+            --latest
