@@ -164,8 +164,12 @@ export default function RespondScreen() {
 
           {target && (
             <AlertMap
-              showsUserLocation
-              points={[{ id: 'patient', ...target, title: requester.name, kind: 'patient' }]}
+              points={[
+                { id: 'patient', ...target, title: requester.name, kind: 'patient' },
+                ...(myPos
+                  ? [{ id: 'me', ...myPos, title: 'You', subtitle: formatDistance(liveDistance), kind: 'responder' as const }]
+                  : []),
+              ]}
             />
           )}
 

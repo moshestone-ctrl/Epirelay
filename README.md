@@ -17,7 +17,7 @@ alert, tap **I'm on my way**, navigate there, and hand it over.
 | **911 first** | "Call 911" is on every emergency screen. Onboarding makes users confirm the app doesn't replace 911. |
 | **Responders** | Carriers set device type (auto-injector or nasal spray) and expiration date, and toggle "Available". Expired devices stop receiving alerts. Reminders 30 days, 7 days and on the expiry date. |
 | **Matching** | Up to 3 responders can come at once (in case a second dose is needed). Others are told enough help is coming. |
-| **Live tracking** | The person in need sees who's coming and how far away, on a map, updating every ~10 s. Responders get one-tap directions in Apple/Google Maps. |
+| **Live map** | After an SOS, an in-app map shows you, the search area, and each responder on the way with their name and distance, updating every ~10 s. Responders see a map to the person plus one-tap directions in Apple/Google Maps. Uses free OpenFreeMap / OpenStreetMap tiles — no API key or account. |
 | **Chat** | Two-way messages between the person and responders ("Apt 4B, door open"). |
 | **Privacy** | Nobody can see where carriers are — the app only shows a count nearby. Responders see only the *distance* until they commit to coming. Allergy info is shared only with committed responders, and only if the user allows it. Old precise locations are automatically coarsened. |
 | **Background alerts** | Responders who allow location "All the time" stay matchable and get alerted while EpiRelay is in the background (Android shows a "Ready to respond" notification while they're Available). |
@@ -45,10 +45,7 @@ Each new build installs over the previous one and keeps your sign-in. To share i
 collaborators on the repository (Settings → Collaborators) so they can open the Releases page too.
 
 **Good to know about this test build**
-- The in-app map needs a free Google Maps API key. Without one, the app shows distances and an
-  "Open in Google Maps" button instead. To turn the map on: create an Android Maps SDK key in Google Cloud
-  Console, add it as a repository secret named `GOOGLE_MAPS_ANDROID_API_KEY` (Settings → Secrets and variables →
-  Actions), then re-run the build (Actions → Build Android app → Run workflow).
+- The map uses free OpenFreeMap tiles (OpenStreetMap data), so there's no map key to set up.
 - Alerts reach a responder while EpiRelay is open, or running in the background after they allowed location
   "All the time". Alerts after the app has been fully closed need push notifications — see the next section.
 - It's signed with a test key, which is fine for installing directly but not for the Play Store. Google plans to
@@ -155,7 +152,7 @@ alerts reach responders even after the app has been fully closed.
 | **Alerts when the app is closed** | Code done; needs the Expo + Firebase accounts described above. | ~1 hour once accounts exist |
 | **iOS Critical Alerts** | Lets SOS alerts sound even on silent / Do Not Disturb. Requires applying to Apple for a special entitlement — worth doing early, approval takes time. | Apply now |
 | **Background location review** | Built. Google Play and Apple require a written justification and a short video of the "Allow all the time" explanation screen when you submit. | 1 day |
-| **Store accounts + release** | Apple Developer ($99/yr), Google Play ($25 once), app icons, store listings, a Google Maps API key for Android (`react-native-maps` plugin in `app.json`). | 1–2 weeks |
+| **Store accounts + release** | Apple Developer ($99/yr), Google Play ($25 once), store listings and screenshots. | 1–2 weeks |
 | **Email confirmation + own email sender, phone verification** | Password reset is built. Turn email confirmation back on with your own SMTP sender; phone verification is optional. | 1 day |
 | **Legal content** | Terms, Privacy Policy, waiver, state-by-state summaries for the Safety & legal screen (currently a marked placeholder). From a lawyer, not a developer. | — |
 | **Medical review** | Have an allergist or EMS professional review the first-aid text on the Safety screen. | — |
@@ -181,10 +178,10 @@ These were deliberate; change them only after thinking them through.
 ## For your developer
 
 - **Stack:** Expo SDK 58 (React Native 0.88, Expo Router, React Compiler), TypeScript, Supabase (Postgres + RLS +
-  Realtime + pg_net), `react-native-maps`.
+  Realtime + pg_net), MapLibre React Native with OpenFreeMap tiles (`src/components/AlertMap.tsx`).
 - **Builds:** `.github/workflows/android.yml` runs type-check, lint and backend tests, then `expo prebuild` +
   `gradlew assembleRelease` (arm64-v8a, armeabi-v7a, x86_64 — the last so the emulator launch check can run it) and publishes the APK as a GitHub Release. Config is in
-  `app.config.js` (Maps key and version code come from the build environment). The `android/` folder is generated
+  `app.config.js` (Expo project ID and version code come from the build environment). The `android/` folder is generated
   and not committed. For store releases, switch to EAS Build or add a real upload keystore.
 - **Backend:** everything is in `supabase/schema.sql` — tables, row-level-security policies, and `security definer`
   RPCs. Matching uses a haversine distance with a lat/lng bounding box; switch to PostGIS when you outgrow it.

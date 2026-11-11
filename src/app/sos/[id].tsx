@@ -79,7 +79,14 @@ export default function SosScreen() {
     { id: 'me', latitude: alert.lat, longitude: alert.lng, title: 'You', kind: 'patient' },
     ...coming
       .filter((r) => r.lat !== null && r.lng !== null)
-      .map((r) => ({ id: r.user_id, latitude: r.lat!, longitude: r.lng!, title: r.name, kind: 'responder' as const })),
+      .map((r) => ({
+        id: r.user_id,
+        latitude: r.lat!,
+        longitude: r.lng!,
+        title: r.name,
+        subtitle: r.status === 'arrived' ? 'here' : formatDistance(r.distance_m),
+        kind: 'responder' as const,
+      })),
   ];
 
   return (
@@ -98,6 +105,8 @@ export default function SosScreen() {
           <Button title="Done" onPress={() => router.replace('/')} />
         </Card>
       )}
+
+      <AlertMap points={points} radiusM={active ? alert.radius_m : undefined} />
 
       <Card>
         <T kind="label">Status</T>
@@ -128,8 +137,6 @@ export default function SosScreen() {
           <Button kind="secondary" title="Widen search (~5 miles)" onPress={widen} loading={busy === 'widen'} />
         )}
       </Card>
-
-      <AlertMap points={points} />
 
       {active && profile?.allergies && profile.share_medical_with_responders && (
         <T kind="small">Your allergy info is shared with responders once they’re on their way.</T>

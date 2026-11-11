@@ -49,3 +49,34 @@ if [ "$REQUIRE_SCREEN" = true ]; then
   fi
   echo "App opened and showed its first screen."
 fi
+
+# ---- Map check: open the sample SOS map and make sure it draws without crashing ----
+adb logcat -c
+adb shell am start -W -a android.intent.action.VIEW -d "epirelay://map-check" "$PKG" >/dev/null 2>&1
+MAP_TEXT=""
+for i in $(seq 1 12); do
+  sleep 5
+  adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
+  MAP_TEXT=$(adb shell cat /sdcard/ui.xml 2>/dev/null | grep -oE '(text|content-desc)="[^"]+"' | head -40)
+  echo "$MAP_TEXT" | grep -qE 'Marcus|Map check' && break
+done
+sleep 8  # let map tiles finish loading for the screenshot
+MAP_RUNNING=false
+adb shell pidof "$PKG" >/dev/null && MAP_RUNNING=true
+echo "===== MAP CHECK: $([ $MAP_RUNNING = true ] && echo RUNNING || echo 'CRASHED') ====="
+adb logcat -d -b crash | tail -80
+adb logcat -d | grep -iE "maplibre|mbgl|AndroidRuntime|ReactNativeJS" | grep -viE "libc  " | tail -40
+echo "$MAP_TEXT"
+adb exec-out screencap -p > map-check.png 2>/dev/null
+if command -v convert >/dev/null 2>&1; then convert map-check.png -resize 45% -quality 70 map-check.jpg && SHOT=map-check.jpg; else SHOT=map-check.png; fi
+echo "===== MAP SCREENSHOT BASE64 BEGIN ($SHOT) ====="
+base64 -w 0 "$SHOT"; echo
+echo "===== MAP SCREENSHOT BASE64 END ====="
+
+if [ "$REQUIRE_SCREEN" = true ]; then
+  if [ "$MAP_RUNNING" != true ]; then echo "::error::The app crashed when showing the map."; exit 1; fi
+  if ! echo "$MAP_TEXT" | grep -q 'Map check'; then echo "::error::The map screen didn't open."; exit 1; fi
+  echo "$MAP_TEXT" | grep -q 'Marcus' || echo "::warning::Map markers weren't visible to the UI inspector; check the screenshot."
+
+  echo "Map check passed."
+fi

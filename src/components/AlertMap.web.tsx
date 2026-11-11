@@ -5,8 +5,8 @@ import { radius, useTheme } from '@/lib/theme';
 import type { MapPoint } from './AlertMap';
 import { T } from './ui';
 
-/** Web preview only — the real map (react-native-maps) runs on phones. */
-export function AlertMap({ points }: { points: MapPoint[]; showsUserLocation?: boolean }) {
+/** Web preview only — the real map (MapLibre) runs on phones. */
+export function AlertMap({ points }: { points: MapPoint[]; radiusM?: number; height?: number; showsUserLocation?: boolean }) {
   const t = useTheme();
   if (points.length === 0) return null;
   return (
@@ -23,6 +23,7 @@ export function AlertMap({ points }: { points: MapPoint[]; showsUserLocation?: b
       {points.map((p) => (
         <T key={p.id} kind="small">
           {p.kind === 'patient' ? '🔴' : '🔵'} {p.title}
+          {p.subtitle ? ` · ${p.subtitle}` : ''}
         </T>
       ))}
     </View>

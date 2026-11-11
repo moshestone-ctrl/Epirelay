@@ -1,7 +1,5 @@
 // App configuration. Values in CAPS come from the build environment (GitHub settings) and are optional.
 //
-//   GOOGLE_MAPS_ANDROID_API_KEY  – turns on the live map on Android (without it, the app shows distances
-//                                  and a "Open in Google Maps" button instead of an in-app map)
 //   EAS_PROJECT_ID               – your Expo project ID; turns on alerts that arrive while the app is closed
 //                                  (together with google-services.json from Firebase, see README)
 //   APP_VERSION_CODE             – set automatically by the GitHub build so each new APK installs over the last
@@ -11,7 +9,6 @@
 const fs = require('fs');
 const path = require('path');
 
-const mapsKey = process.env.GOOGLE_MAPS_ANDROID_API_KEY || '';
 const versionCode = Number(process.env.APP_VERSION_CODE || 1);
 const easProjectId = process.env.EAS_PROJECT_ID || '';
 const hasFirebaseConfig = fs.existsSync(path.join(process.cwd(), 'google-services.json'));
@@ -81,7 +78,8 @@ module.exports = {
           imageWidth: 110,
         },
       ],
-      ['react-native-maps', mapsKey ? { androidGoogleMapsApiKey: mapsKey } : {}],
+      // In-app map (MapLibre + free OpenFreeMap tiles; no API key needed).
+      '@maplibre/maplibre-react-native',
       [
         'expo-build-properties',
         {
@@ -95,7 +93,6 @@ module.exports = {
       ],
     ],
     extra: {
-      androidMapsEnabled: Boolean(mapsKey),
       ...(easProjectId ? { eas: { projectId: easProjectId } } : {}),
     },
     experiments: {

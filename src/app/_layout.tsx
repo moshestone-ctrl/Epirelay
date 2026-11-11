@@ -78,6 +78,7 @@ function RootStack() {
         </Stack.Protected>
         <Stack.Screen name="safety" options={{ title: 'Safety & legal' }} />
         <Stack.Screen name="reset-password" options={{ title: 'Set a new password' }} />
+        <Stack.Screen name="map-check" options={{ title: 'Map check' }} />
       </Stack>
       {onboarded && <BackgroundServices />}
     </View>
