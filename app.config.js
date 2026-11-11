@@ -68,6 +68,17 @@ module.exports = {
         },
       ],
       ['react-native-maps', mapsKey ? { androidGoogleMapsApiKey: mapsKey } : {}],
+      [
+        'expo-build-properties',
+        {
+          android: {
+            // Code shrinking (R8) stripped a class Android's WorkManager needs at startup and the app
+            // crashed on launch. Keep it off; the APK is a little bigger but starts reliably.
+            enableMinifyInReleaseBuilds: false,
+            enableShrinkResourcesInReleaseBuilds: false,
+          },
+        },
+      ],
     ],
     extra: {
       androidMapsEnabled: Boolean(mapsKey),

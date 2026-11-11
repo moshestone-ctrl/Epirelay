@@ -45,6 +45,8 @@ jobs:
     needs: checks
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      configured: ${{ steps.cfg.outputs.configured }}
     env:
       APP_VERSION_CODE: ${{ github.run_number }}
       GOOGLE_MAPS_ANDROID_API_KEY: ${{ secrets.GOOGLE_MAPS_ANDROID_API_KEY }}
@@ -95,21 +97,56 @@ jobs:
       - name: Keep a copy on the workflow run
         uses: actions/upload-artifact@v7
         with:
-          name: EpiRelay-build-${{ github.run_number }}
+          name: apk
           path: out/*.apk
           retention-days: 30
 
-      - name: Publish as a GitHub Release
+  launch-test:
+    name: Open the app on an Android emulator
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: apk
+          path: apk
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install, open and check it reaches the first screen
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash .github/scripts/launch-test.sh --require-screen
+
+  publish:
+    name: Publish as a GitHub Release
+    needs: [build, launch-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: apk
+          path: out
+      - name: Create the Release
         env:
           GH_TOKEN: ${{ github.token }}
-          CONFIGURED: ${{ steps.cfg.outputs.configured }}
+          CONFIGURED: ${{ needs.build.outputs.configured }}
         run: |
           if [ "$CONFIGURED" = "true" ]; then
             TITLE="EpiRelay test build ${{ github.run_number }}"
             WARN=""
           else
             TITLE="EpiRelay preview build ${{ github.run_number }} (not connected to a server yet)"
-            WARN="⚠️ This preview isn't connected to a server, so it opens on a 'not connected' screen. Use it to check the app installs; a later build will connect it."$'\n\n'
+            WARN="⚠️ This preview isn't connected to a server, so it opens on a 'not connected' screen."$'\n\n'
           fi
-          NOTES="${WARN}Android build from commit ${GITHUB_SHA::7}."$'\n\n'"**To install:** on your Android phone, tap the .apk file under Assets, then Open → Install. If asked, allow installing apps from your browser. If Play Protect warns about an unknown developer, tap More details → Install anyway."
-          gh release create "build-${{ github.run_number }}" out/*.apk --title "$TITLE" --notes "$NOTES" --latest
+          NOTES="${WARN}Android build from commit ${GITHUB_SHA::7}. Checked: installs and opens on an Android 14 emulator."$'\n\n'"**To install:** on your Android phone, tap the .apk file under Assets, then Open → Install. If asked, allow installing apps from your browser. If Play Protect warns about an unknown developer, tap More details → Install anyway."
+          gh release create "build-${{ github.run_number }}" out/*.apk --repo "${{ github.repository }}" --title "$TITLE" --notes "$NOTES" --latest
